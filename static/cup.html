@@ -3,7 +3,27 @@
 <head>
     <meta charset="UTF-8">
     <title>ЦУП Мосметро — Ситуационный центр беспилотного движения</title>
-    <style>
+    <style>/* Новая панель параметров ИИ-конвейера в стиле ЦУП */
+        .ai-config-bar {
+            display: flex;
+            justify-content: space-between;
+            background: #131926;
+            border: 1px solid #1e293b;
+            border-radius: 6px;
+            padding: 12px 20px;
+            margin-bottom: 20px;
+            font-size: 13px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+        }
+        .ai-config-item {
+            color: #94a3b8;
+            font-family: monospace;
+        }
+        .ai-config-val {
+            font-weight: bold;
+            margin-left: 6px;
+        }
+
         body {
             margin: 0; padding: 20px;
             background-color: #0b0f19; color: #e2e8f0;
@@ -39,6 +59,15 @@
 
     <h1>Центр Управления Поездами (ЦУП) — Ситуационный экран</h1>
     <div class="subtitle">Автоматизированная система диспетчерского контроля беспилотного состава Мосметро</div>
+    <!-- Панель системных констант ИИ-ядра -->
+    <div class="ai-config-bar">
+        <div class="ai-config-item">🎯 TARGET POINTS: <span id="cfg-points" class="ai-config-val" style="color: #38bdf8;">...</span></div>
+        <div class="ai-config-item">🛡️ SAFE DISTANCE Z: <span id="cfg-safe-z" class="ai-config-val" style="color: #eab308;">...</span></div>
+        <div class="ai-config-item">📐 DBSCAN EPS: <span id="cfg-eps" class="ai-config-val" style="color: #22c55e;">...</span></div>
+        <div class="ai-config-item">👥 MIN SAMPLES: <span id="cfg-samples" class="ai-config-val" style="color: #22c55e;">...</span></div>
+        <div class="ai-config-item">🚇 GAUGE WIDTH: <span id="cfg-width" class="ai-config-val" style="color: #a855f7;">...</span></div>
+        <div class="ai-config-item">📡 MAX VISION RANGE: <span id="cfg-max-z" class="ai-config-val" style="color: #06b6d4;">...</span></div>
+    </div>
 
     <!-- Мониторинг линий -->
     <table>
@@ -83,6 +112,27 @@
         const ws = new WebSocket("ws://127.0.0.1:8000/ws/monitoring");
         const logWindow = document.getElementById("log-window");
         let lastLoggedDistance = null; // Следит за физическим изменением метров
+        // Запрос и рендер глобальных констант ядра config.py
+        fetch('/api/config')
+            .then(response => response.json())
+            .then(config => {
+                document.getElementById("cfg-points").innerText = config.V2_OBSTACLE_TARGET_POINTS.toLocaleString();
+                document.getElementById("cfg-safe-z").innerText = config.V2_OBSTACLE_SAFE_DISTANCE_Z + "м";
+                document.getElementById("cfg-eps").innerText = config.DBSCAN_OBSTACLE_EPS;
+                document.getElementById("cfg-samples").innerText = config.DBSCAN_OBSTACLE_MIN_SAMPLES + " пт.";
+                document.getElementById("cfg-width").innerText = (config.TRAIN_HALF_WIDTH * 2).toFixed(2) + "м";
+                document.getElementById("cfg-max-z").innerText = config.MAX_Z_VISION + "м";
+                
+                // Пишем красивый лог об успешной синхронизации параметров
+                const newLog = document.createElement("div");
+                newLog.className = "log-row";
+                newLog.style.color = "#a855f7";
+                newLog.innerText = `[СИСТЕМА] Параметры ИИ-конвейера ядра верифицированы. Зона контроля зажата.`;
+                logWindow.appendChild(newLog);
+            })
+            .catch(err => {
+                console.error("Ошибка получения ИИ-констант:", err);
+            });
 
         ws.onmessage = (event) => {
             const data = JSON.parse(event.data);

@@ -30,8 +30,8 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Жёстко фиксируем путь к вашему датасету
 # TEST_DATA_DIR = "./test_lidar_frames/roundT_doubleT"
-TEST_DATA_DIR = "./test_lidar_frames/doubleT_obstacle"
-# TEST_DATA_DIR = "./test_lidar_frames/roundT_doubleT"
+# TEST_DATA_DIR = "./test_lidar_frames/doubleT_obstacle"
+TEST_DATA_DIR = "./test_lidar_frames/roundT_doubleT"
 # TEST_DATA_DIR = "./test_lidar_frames/roundT_squareT_pressureGate_squareT"
 # TEST_DATA_DIR = "./test_lidar_frames/squareT_platform_squareT_switch"
 
@@ -341,6 +341,19 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         import traceback
         traceback.print_exc()
+        
+@app.get("/api/config")
+def get_ai_config():
+    """Эндпоинт для проброса глобальных ИИ-констант и лимитов в интерфейс ЦУП"""
+    return {
+        "V2_OBSTACLE_TARGET_POINTS": getattr(config, "V2_OBSTACLE_TARGET_POINTS", 40000),
+        "V2_OBSTACLE_SAFE_DISTANCE_Z": getattr(config, "V2_OBSTACLE_SAFE_DISTANCE_Z", 40.0),
+        "DBSCAN_OBSTACLE_EPS": getattr(config, "DBSCAN_OBSTACLE_EPS", 0.35),
+        "DBSCAN_OBSTACLE_MIN_SAMPLES": getattr(config, "DBSCAN_OBSTACLE_MIN_SAMPLES", 4),
+        "TRAIN_HALF_WIDTH": getattr(config, "TRAIN_HALF_WIDTH", 1.35),
+        "MAX_Z_VISION": getattr(config, "MAX_Z", 180.0),
+        "V2_OBSTACLE_WALL_OPEN_THRESHOLD": getattr(config, "V2_OBSTACLE_WALL_OPEN_THRESHOLD", 4.0)
+    }
 
 if __name__ == "__main__":
     import uvicorn
