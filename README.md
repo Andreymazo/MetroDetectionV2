@@ -146,6 +146,6 @@ uvicorn app_api:app --host 0.0.0.0 --port 8000 --log-level info
 
 # 🚇 Autonomous Subway 3D Lidar Vision (Digital Twin ADAS)
 
-▶️ **[СМОТРЕТЬ ВИДЕОДЕМОНСТРАЦИЮ РАБОТЫ СИСТЕМЫ (40 СЕКУНД)](ВСТАВЬТЕ_СЮДА_ВАШУ_ССЫЛКУ_НА_YOUTUBE)**
+▶️ **[СМОТРЕТЬ ВИДЕОДЕМОНСТРАЦИЮ РАБОТЫ СИСТЕМЫ (две минуты)](ВСТАВЬТЕ_СЮДА_ВАШУ_ССЫЛКУ_НА_YOUTUBE)**
 
 [![Превью видео](https://youtube.com)](https://youtu.be/RolNGwpZ67s)
