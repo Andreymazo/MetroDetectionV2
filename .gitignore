@@ -1,0 +1,53 @@
+
+# Веса нейросетей (Исключаем базовые и обученные модели)
+*.pt
+*.pth
+*.onnx
+subway_pilot/
+
+# Видео и датасеты (Не заливаем тестовые гигабайты видео в Git)
+*.mp4
+*.avi
+*.mkv
+*.jpg
+*.jpeg
+*.png
+*.csv
+datasets/
+test_subway_video.mp4
+submission.csv
+
+# Виртуальные окружения Python
+.venv/
+venv/
+env/
+ENV/
+.pyenv/
+
+# Папки кэш Python и системные файлы
+static/js/
+static/index_bck.html
+for_hackathon.zst
+for_hackathon/
+test_lidar_frames_bck/
+
+.vscode/
+__pycache__/
+.idea/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Системные файлы операционных систем
+.DS_Store
+Thumbs.db
+
+# Результаты обучения YOLO (логи, чекпоинты и веса моделей)
+runs/
+
+test_lidar_frames/
+test_lidar_frames_150/
+test_lidar_frames_5/
+*.gif
