@@ -60,14 +60,49 @@
     <h1>Центр Управления Поездами (ЦУП) — Ситуационный экран</h1>
     <div class="subtitle">Автоматизированная система диспетчерского контроля беспилотного состава Мосметро</div>
     <!-- Панель системных констант ИИ-ядра -->
-    <div class="ai-config-bar">
-        <div class="ai-config-item">🎯 TARGET POINTS: <span id="cfg-points" class="ai-config-val" style="color: #38bdf8;">...</span></div>
-        <div class="ai-config-item">🛡️ SAFE DISTANCE Z: <span id="cfg-safe-z" class="ai-config-val" style="color: #eab308;">...</span></div>
-        <div class="ai-config-item">📐 DBSCAN EPS: <span id="cfg-eps" class="ai-config-val" style="color: #22c55e;">...</span></div>
-        <div class="ai-config-item">👥 MIN SAMPLES: <span id="cfg-samples" class="ai-config-val" style="color: #22c55e;">...</span></div>
-        <div class="ai-config-item">🚇 GAUGE WIDTH: <span id="cfg-width" class="ai-config-val" style="color: #a855f7;">...</span></div>
-        <div class="ai-config-item">📡 MAX VISION RANGE: <span id="cfg-max-z" class="ai-config-val" style="color: #06b6d4;">...</span></div>
+    <!-- Интерактивный пульт управления параметрами ИИ-ядра -->
+    <div class="ai-config-bar" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px 30px; height: auto; padding: 15px 20px;">
+        
+        <div class="ai-config-item" style="display: flex; flex-direction: column; gap: 5px;">
+            <label>🎯 TARGET POINTS: <span id="val-points" style="color:#38bdf8; font-weight:bold;">...</span></label>
+            <input type="range" id="cfg-points" min="5000" max="100000" step="5000" oninput="sendConfigUpdate()">
+        </div>
+        
+        <div class="ai-config-item" style="display: flex; flex-direction: column; gap: 5px;">
+            <label>🛡️ SAFE DISTANCE Z: <span id="val-safe-z" style="color:#eab308; font-weight:bold;">...</span></label>
+            <input type="range" id="cfg-safe-z" min="10" max="80" step="5" oninput="sendConfigUpdate()">
+        </div>
+        
+        <div class="ai-config-item" style="display: flex; flex-direction: column; gap: 5px;">
+            <label>📐 DBSCAN EPS: <span id="val-eps" style="color:#22c55e; font-weight:bold;">...</span></label>
+            <input type="range" id="cfg-eps" min="0.1" max="1.0" step="0.05" oninput="sendConfigUpdate()">
+        </div>
+        
+        <div class="ai-config-item" style="display: flex; flex-direction: column; gap: 5px;">
+            <label>👥 MIN SAMPLES: <span id="val-samples" style="color:#22c55e; font-weight:bold;">...</span></label>
+            <input type="range" id="cfg-samples" min="1" max="15" step="1" oninput="sendConfigUpdate()">
+        </div>
+        
+        <div class="ai-config-item" style="display: flex; flex-direction: column; gap: 5px;">
+            <label>🚇 GAUGE WIDTH: <span id="val-width" style="color:#a855f7; font-weight:bold;">...</span></label>
+            <input type="range" id="cfg-width" min="1.5" max="3.5" step="0.1" oninput="sendConfigUpdate()">
+        </div>
+        
+        <div class="ai-config-item" style="display: flex; flex-direction: column; gap: 5px;">
+            <label>📡 MAX VISION RANGE: <span id="val-max-z" style="color:#06b6d4; font-weight:bold;">...</span></label>
+            <input type="range" id="cfg-max-z" min="50" max="250" step="10" oninput="sendConfigUpdate()">
+        </div>
+            <!-- Вставляем тумблер 3D-мешей внутрь блока .ai-config-bar -->
+        <div class="ai-config-item" style="display: flex; flex-direction: column; gap: 5px; justify-content: center;">
+            <label style="display: flex; align-items: center; cursor: pointer; margin-top: 15px;">
+                <input type="checkbox" id="cfg-meshbox" onchange="sendConfigUpdate()" style="width: 18px; height: 18px; margin-right: 10px; cursor: pointer; accent-color: #00f0ff;">
+                <span style="color: #00f0ff; font-weight: bold;">📦 ОТОБРАЖАТЬ 3D MESHBOX</span>
+            </label>
+        </div>
+
+        
     </div>
+
 
     <!-- Мониторинг линий -->
     <table>
@@ -112,27 +147,121 @@
         const ws = new WebSocket("ws://127.0.0.1:8000/ws/monitoring");
         const logWindow = document.getElementById("log-window");
         let lastLoggedDistance = null; // Следит за физическим изменением метров
-        // Запрос и рендер глобальных констант ядра config.py
-        fetch('/api/config')
-            .then(response => response.json())
-            .then(config => {
-                document.getElementById("cfg-points").innerText = config.V2_OBSTACLE_TARGET_POINTS.toLocaleString();
-                document.getElementById("cfg-safe-z").innerText = config.V2_OBSTACLE_SAFE_DISTANCE_Z + "м";
-                document.getElementById("cfg-eps").innerText = config.DBSCAN_OBSTACLE_EPS;
-                document.getElementById("cfg-samples").innerText = config.DBSCAN_OBSTACLE_MIN_SAMPLES + " пт.";
-                document.getElementById("cfg-width").innerText = (config.TRAIN_HALF_WIDTH * 2).toFixed(2) + "м";
-                document.getElementById("cfg-max-z").innerText = config.MAX_Z_VISION + "м";
-                
-                // Пишем красивый лог об успешной синхронизации параметров
+        console.log("[ЦУП ДЕБАГ] Скрипт инициализирован. Начинаем опрос ИИ-сервера...");
+
+// 1. При загрузке страницы стягиваем текущие значения из config.py
+fetch('/api/config')
+    .then(response => {
+        console.log("[ЦУП ДЕБАГ] Сервер ответил на HTTP-запрос. Статус:", response.status);
+        return response.json();
+    })
+    .then(config => {
+        console.log("[ЦУП ДЕБАГ] УСПЕШНО! Сырой JSON-пакет от FastAPI:", config);
+        
+        // Проверяем наличие DOM-элементов перед записью (защита от Null)
+        console.log("[ЦУП ДЕБАГ] Проверка DOM-элементов ползунков:");
+        console.log("  ↳ cfg-points:", document.getElementById("cfg-points"));
+        console.log("  ↳ cfg-safe-z:", document.getElementById("cfg-safe-z"));
+        console.log("  ↳ cfg-meshbox:", document.getElementById("cfg-meshbox"));
+
+        // Проставляем значения в ползунки
+        document.getElementById("cfg-points").value = config.V2_OBSTACLE_TARGET_POINTS;
+        document.getElementById("cfg-safe-z").value = config.V2_OBSTACLE_SAFE_DISTANCE_Z;
+        document.getElementById("cfg-eps").value = config.DBSCAN_OBSTACLE_EPS;
+        document.getElementById("cfg-samples").value = config.DBSCAN_OBSTACLE_MIN_SAMPLES;
+        document.getElementById("cfg-width").value = (config.TRAIN_HALF_WIDTH * 2);
+        document.getElementById("cfg-max-z").value = config.MAX_Z_VISION;
+        
+        // Выставляем галочку чекбокса
+        document.getElementById("cfg-meshbox").checked = config.V2_OBSTACLE_SHOW_3D_MESHBOX;
+        
+        console.log("[ЦУП ДЕБАГ] Ползунки успешно выставлены в позиции. Запускаем рендер текста...");
+
+        // Зажигаем неоновые циферки на экране вместо троеточий
+        updateTextLabels(
+            config.V2_OBSTACLE_TARGET_POINTS, 
+            config.V2_OBSTACLE_SAFE_DISTANCE_Z, 
+            config.DBSCAN_OBSTACLE_EPS, 
+            config.DBSCAN_OBSTACLE_MIN_SAMPLES, 
+            (config.TRAIN_HALF_WIDTH * 2), 
+            config.MAX_Z_VISION
+        );
+        
+        const newLog = document.createElement("div");
+        newLog.className = "log-row";
+        newLog.style.color = "#a855f7";
+        newLog.innerText = `[СИСТЕМА] Интерактивный ИИ-пульт синхронизирован с ядром. Управление активно.`;
+        logWindow.appendChild(newLog);
+    })
+    .catch(err => {
+        console.error("❌ [ЦУП ДЕБАГ КРИТ] Ошибка в цепочке обработки конфигурации:", err);
+    });
+
+// Вспомогательная функция обновления текста над ползунками
+function updateTextLabels(points, safeZ, eps, samples, width, maxZ) {
+    console.log("[ЦУП ДЕБАГ] Вызвана функция updateTextLabels с параметрами:", {points, safeZ, eps, samples, width, maxZ});
+    
+    try {
+        document.getElementById("val-points").innerText = parseInt(points).toLocaleString();
+        document.getElementById("val-safe-z").innerText = parseFloat(safeZ).toFixed(0) + "м";
+        document.getElementById("val-eps").innerText = parseFloat(eps).toFixed(2);
+        document.getElementById("val-samples").innerText = parseInt(samples) + " пт.";
+        document.getElementById("val-width").innerText = parseFloat(width).toFixed(2) + "м";
+        document.getElementById("val-max-z").innerText = parseFloat(maxZ).toFixed(0) + "м";
+        console.log("[ЦУП ДЕБАГ] Текстовые метки успешно обновлены на экране!");
+    } catch (e) {
+        console.error("❌ [ЦУП ДЕБАГ КРИТ] Ошибка обновления innerText в DOM:", e);
+    }
+}
+
+// 2. Функция отправки новых параметров на бэкенд FastAPI
+let debounceTimer;
+function sendConfigUpdate() {
+    const points = parseInt(document.getElementById("cfg-points").value);
+    const safeZ = parseFloat(document.getElementById("cfg-safe-z").value);
+    const eps = parseFloat(document.getElementById("cfg-eps").value);
+    const samples = parseInt(document.getElementById("cfg-samples").value);
+    const width = parseFloat(document.getElementById("cfg-width").value);
+    const maxZ = parseFloat(document.getElementById("cfg-max-z").value);
+    const showMeshbox = document.getElementById("cfg-meshbox").checked;
+
+    updateTextLabels(points, safeZ, eps, samples, width, maxZ);
+
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+        const payload = {
+            V2_OBSTACLE_TARGET_POINTS: points,
+            V2_OBSTACLE_SAFE_DISTANCE_Z: safeZ,
+            DBSCAN_OBSTACLE_EPS: eps,
+            DBSCAN_OBSTACLE_MIN_SAMPLES: samples,
+            TRAIN_HALF_WIDTH: width,
+            MAX_Z_VISION: maxZ,
+            V2_OBSTACLE_SHOW_3D_MESHBOX: showMeshbox
+        };
+
+        console.log("[ЦУП ДЕБАГ] Отправляем POST на сервер с новым payload:", payload);
+
+        fetch('/api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        })
+        .then(res => res.json())
+        .then(resData => {
+            console.log("[ЦУП ДЕБАГ] Ответ сервера на POST-запрос:", resData);
+            if (resData.status === "success") {
                 const newLog = document.createElement("div");
                 newLog.className = "log-row";
-                newLog.style.color = "#a855f7";
-                newLog.innerText = `[СИСТЕМА] Параметры ИИ-конвейера ядра верифицированы. Зона контроля зажата.`;
+                newLog.style.color = showMeshbox ? "#22c55e" : "#eab308";
+                newLog.innerText = `[ЦУП ДИСПЕТЧЕР] Константы ИИ-ядра переопределены. EPS=${eps}, 3D-Boxes=${showMeshbox ? "ВКЛ 📦" : "ВЫКЛ 🌌"}`;
                 logWindow.appendChild(newLog);
-            })
-            .catch(err => {
-                console.error("Ошибка получения ИИ-констант:", err);
-            });
+                logWindow.scrollTop = logWindow.scrollHeight;
+            }
+        })
+        .catch(err => console.error("❌ [ЦУП ДЕБАГ КРИТ] Ошибка отправки POST:", err));
+    }, 150);
+}
+
 
         ws.onmessage = (event) => {
             const data = JSON.parse(event.data);

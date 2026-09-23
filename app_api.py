@@ -5,6 +5,8 @@ import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
 
 # Импортируем движок одометрии стен тоннеля
 # from cos_processor_v11 import StableLidarOdometryV10
@@ -28,10 +30,53 @@ app.add_middleware(
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+
+# =====================================================================
+# 🎛️ ИНТЕГРАЦИЯ ИНТЕРАКТИВНОГО ЦУП (Pydantic-схема и эндпоинты)
+# =====================================================================
+class ConfigUpdate(BaseModel):
+    V2_OBSTACLE_TARGET_POINTS: int
+    V2_OBSTACLE_SAFE_DISTANCE_Z: float
+    DBSCAN_OBSTACLE_EPS: float
+    DBSCAN_OBSTACLE_MIN_SAMPLES: int
+    TRAIN_HALF_WIDTH: float
+    MAX_Z_VISION: float
+    V2_OBSTACLE_SHOW_3D_MESHBOX: bool  # Новый флаг визуализации
+
+@app.get("/api/config")
+def get_ai_config():
+    """Эндпоинт для проброса глобальных ИИ-констант и лимитов в интерфейс ЦУП"""
+    return {
+        "V2_OBSTACLE_TARGET_POINTS": getattr(config, "V2_OBSTACLE_TARGET_POINTS", 40000),
+        "V2_OBSTACLE_SAFE_DISTANCE_Z": getattr(config, "V2_OBSTACLE_SAFE_DISTANCE_Z", 40.0),
+        "DBSCAN_OBSTACLE_EPS": getattr(config, "DBSCAN_OBSTACLE_EPS", 0.35),
+        "DBSCAN_OBSTACLE_MIN_SAMPLES": getattr(config, "DBSCAN_OBSTACLE_MIN_SAMPLES", 4),
+        "TRAIN_HALF_WIDTH": getattr(config, "TRAIN_HALF_WIDTH", 1.35),
+        "MAX_Z_VISION": getattr(config, "MAX_Z", 180.0),
+        "V2_OBSTACLE_WALL_OPEN_THRESHOLD": getattr(config, "V2_OBSTACLE_WALL_OPEN_THRESHOLD", 4.0),
+        "V2_OBSTACLE_SHOW_3D_MESHBOX": getattr(config, "V2_OBSTACLE_SHOW_3D_MESHBOX", True)
+    }
+
+@app.post("/api/config")
+def update_ai_config(new_cfg: ConfigUpdate):
+    """Эндпоинт динамического изменения параметров config.py на лету из ЦУП"""
+    try:
+        config.V2_OBSTACLE_TARGET_POINTS = new_cfg.V2_OBSTACLE_TARGET_POINTS
+        config.V2_OBSTACLE_SAFE_DISTANCE_Z = new_cfg.V2_OBSTACLE_SAFE_DISTANCE_Z
+        config.DBSCAN_OBSTACLE_EPS = new_cfg.DBSCAN_OBSTACLE_EPS
+        config.DBSCAN_OBSTACLE_MIN_SAMPLES = new_cfg.DBSCAN_OBSTACLE_MIN_SAMPLES
+        config.TRAIN_HALF_WIDTH = round(new_cfg.TRAIN_HALF_WIDTH / 2.0, 2)
+        config.MAX_Z = new_cfg.MAX_Z_VISION
+        config.V2_OBSTACLE_SHOW_3D_MESHBOX = new_cfg.V2_OBSTACLE_SHOW_3D_MESHBOX  # Перезаписываем флаг
+        return {"status": "success", "message": "Параметры ИИ-ядра успешно применены"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+# =====================================================================
+
 # Жёстко фиксируем путь к вашему датасету
 # TEST_DATA_DIR = "./test_lidar_frames/roundT_doubleT"
-# TEST_DATA_DIR = "./test_lidar_frames/doubleT_obstacle"
-TEST_DATA_DIR = "./test_lidar_frames/roundT_doubleT"
+TEST_DATA_DIR = "./test_lidar_frames/doubleT_obstacle"
+# TEST_DATA_DIR = "./test_lidar_frames/roundT_doubleT"
 # TEST_DATA_DIR = "./test_lidar_frames/roundT_squareT_pressureGate_squareT"
 # TEST_DATA_DIR = "./test_lidar_frames/squareT_platform_squareT_switch"
 
@@ -341,19 +386,7 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         import traceback
         traceback.print_exc()
-        
-@app.get("/api/config")
-def get_ai_config():
-    """Эндпоинт для проброса глобальных ИИ-констант и лимитов в интерфейс ЦУП"""
-    return {
-        "V2_OBSTACLE_TARGET_POINTS": getattr(config, "V2_OBSTACLE_TARGET_POINTS", 40000),
-        "V2_OBSTACLE_SAFE_DISTANCE_Z": getattr(config, "V2_OBSTACLE_SAFE_DISTANCE_Z", 40.0),
-        "DBSCAN_OBSTACLE_EPS": getattr(config, "DBSCAN_OBSTACLE_EPS", 0.35),
-        "DBSCAN_OBSTACLE_MIN_SAMPLES": getattr(config, "DBSCAN_OBSTACLE_MIN_SAMPLES", 4),
-        "TRAIN_HALF_WIDTH": getattr(config, "TRAIN_HALF_WIDTH", 1.35),
-        "MAX_Z_VISION": getattr(config, "MAX_Z", 180.0),
-        "V2_OBSTACLE_WALL_OPEN_THRESHOLD": getattr(config, "V2_OBSTACLE_WALL_OPEN_THRESHOLD", 4.0)
-    }
+
 
 if __name__ == "__main__":
     import uvicorn
