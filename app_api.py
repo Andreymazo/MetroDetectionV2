@@ -152,7 +152,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     if is_open_space:
                         print(f" 🛬 [ГЕО-ШЛЮЗ]: Зафиксировано расширение туннеля (Разлет стен: {min_wall_x:.1f}м ... {max_wall_x:.1f}м). Смена режима следования колеи.", flush=True)
 
-                    detected_obstacles = process_point_cloud(file_path, obstacle_tracker_engine, is_open_space=is_open_space)
+                    detected_obstacles = process_point_cloud(file_path, obstacle_tracker_engine, train_step_z=shift_z_physical, is_open_space=is_open_space)
 
                     
                     # -----------------------------------------------------------------

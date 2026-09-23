@@ -111,6 +111,7 @@ class LidarObstacleTrackerV2:
             collapsed.append(merged_obj)
             
         return collapsed
+    
     def _estimate_train_velocity(self, current_objects):
         """Векторная одометрия по стабильным кластерам стен (ICP-Light на NumPy)."""
         if not self.past_tracks or not current_objects:
@@ -136,12 +137,13 @@ class LidarObstacleTrackerV2:
                 return float(np.mean(valid_shifts))
 
         return 0.50
-    def track_and_filter_ghosts(self, current_frame_objects):
-        """MOT-конвейер покадровой ассоциации со строгим фильтром по трем кадрам."""
+
+    def track_and_filter_ghosts(self, current_frame_objects, train_step_z=0.0):
+        """MOT-конвейер покадровой ассоциации со строгим фильтром подтверждения целей."""
         final_safe_objects = []
         current_frame_objects = self._collapse_duplicates(current_frame_objects)
 
-        # Режим ведения вслепую (Coasting), если на текущем кадре пусто
+        # Режим ведения вслепую (Coasting) для удержания целей при пропусках кадров
         if not current_frame_objects:
             if not self.past_tracks:
                 return []
@@ -150,9 +152,11 @@ class LidarObstacleTrackerV2:
                 tr["age"] = tr.get("age", 0) + 1
                 if tr["age"] > config.TRACK_MAX_COASTING_AGE:
                     continue
+                
+                # 🟢 ИИ-ФИКС ЗНАКА: Сдвигаем упущенные объекты вперед навстречу кабине (+)
+                tr["center"][2] += float(train_step_z)
                 updated_past_tracks.append(tr)
                 
-                # Удерживаем на экране только те цели, которые успели подтвердиться
                 if tr["hits"] >= 3:
                     cx, cy, cz = tr["center"]
                     w, h, d = tr["dimensions"]
@@ -164,7 +168,7 @@ class LidarObstacleTrackerV2:
             self.past_tracks = updated_past_tracks
             return final_safe_objects
 
-        # Холодный старт цепочки при первом появлении объектов в сессии
+        # Холодный старт цепочки трекинга на первом кадре сессии
         if not self.past_tracks:
             new_tracks = []
             for obj in current_frame_objects:
@@ -178,18 +182,22 @@ class LidarObstacleTrackerV2:
                 }
                 new_tracks.append(track_state)
             self.past_tracks = new_tracks
-            print(f" 🛰️ [Трекер межкадровый]: Накопление истории... Подтверждено треков: 0", flush=True)
-            return []
+            print(f" 🛰️ [Трекер межкадровый]: Инициализация (кадр 0). Накопление истории...", flush=True)
+            return [] 
 
-        # Извлекаем центры для матричного NumPy-расчета расстояний 3D
         curr_centers = np.array([obj["center"] for obj in current_frame_objects]).reshape(-1, 3)
         past_centers = np.array([tr["center"] for tr in self.past_tracks]).reshape(-1, 3)
+        
+        # 🟢 ПРЕЦИЗИОННЫЙ ИИ-ФИКС ЗНАКА: Прогноз старых треков набегает навстречу поезду (+)
+        past_centers_predicted = past_centers.copy()
+        past_centers_predicted[:, 2] += train_step_z 
 
-        # Вычисляем Евклидову матрицу расстояний между текущим и прошлым кадром
-        dists_3d = np.linalg.norm(curr_centers[:, np.newaxis, :] - past_centers[np.newaxis, :, :], axis=2)
+        dists_3d = np.linalg.norm(curr_centers[:, np.newaxis, :] - past_centers_predicted[np.newaxis, :, :], axis=2)
         best_past_indices = np.argmin(dists_3d, axis=1)
         min_dists_3d = np.min(dists_3d, axis=1)
-        association_gate_mask = min_dists_3d < 2.0  # Ворота ассоциации объектов между кадрами
+        
+        # Ваши родные рабочие ворота ассоциации (2.5 метра — оставляем без изменений)
+        association_gate_mask = min_dists_3d < 2.5 
 
         matched_past_indices = set()
         new_tracks = []
@@ -212,7 +220,6 @@ class LidarObstacleTrackerV2:
                 hits = 1
                 age = 0
 
-            # Плавное сглаживание габаритов 3D бокса по экспоненте
             if past_track is not None:
                 past_w, past_h, past_d = past_track["dimensions"]
                 render_w = (past_w * 0.7) + (width * 0.3)
@@ -227,24 +234,138 @@ class LidarObstacleTrackerV2:
             }
             new_tracks.append(track_state)
 
-            # 🛑 ЖЕСТКИЙ ФИЛЬТР ПО ТРЕМ КАДРАМ: Пропускаем преграду, только если она стабильна!
             if hits >= 3:
                 final_safe_objects.append({
-                    "id": track_id, "class_id": 1, "confidence": 1.0,
-                    "center": [cx, cy, cz], "dimensions": [max(0.4, render_w), max(0.4, render_h), max(0.4, render_d)],
-                    "train_speed": 0.0, "obstacle_speed": 0.0
+                    "id": track_id, 
+                    "class_id": 1, 
+                    "confidence": 1.0,
+                    "center": [cx, cy, cz], 
+                    "dimensions": [max(0.4, render_w), max(0.4, render_h), max(0.4, render_d)],
+                    "train_speed": 0.0, 
+                    "obstacle_speed": 0.0
                 })
 
-        # Удерживаем в памяти Coasting-треки, потерявшие пару на один такт
         for j, tr in enumerate(self.past_tracks):
             if j not in matched_past_indices:
                 tr["age"] = tr.get("age", 0) + 1
                 if tr["age"] <= config.TRACK_MAX_COASTING_AGE:
+                    # Смещаем Coasting-треки синхронно с общим потоком кадра
+                    tr["center"][2] += float(train_step_z)
                     new_tracks.append(tr)
 
         self.past_tracks = new_tracks
         print(f" 🛰️ [Трекер межкадровый]: Подтверждено треков (hits>=3): {len(final_safe_objects)} | Всего треков в памяти: {len(self.past_tracks)}", flush=True)
         return final_safe_objects
+ 
+    # def track_and_filter_ghosts(self, current_frame_objects):
+    #     """MOT-конвейер покадровой ассоциации со строгим фильтром по трем кадрам."""
+    #     final_safe_objects = []
+    #     current_frame_objects = self._collapse_duplicates(current_frame_objects)
+
+    #     # Режим ведения вслепую (Coasting), если на текущем кадре пусто
+    #     if not current_frame_objects:
+    #         if not self.past_tracks:
+    #             return []
+    #         updated_past_tracks = []
+    #         for tr in self.past_tracks:
+    #             tr["age"] = tr.get("age", 0) + 1
+    #             if tr["age"] > config.TRACK_MAX_COASTING_AGE:
+    #                 continue
+    #             updated_past_tracks.append(tr)
+                
+    #             # Удерживаем на экране только те цели, которые успели подтвердиться
+    #             if tr["hits"] >= 3:
+    #                 cx, cy, cz = tr["center"]
+    #                 w, h, d = tr["dimensions"]
+    #                 final_safe_objects.append({
+    #                     "id": tr["id"], "class_id": 1, "confidence": 0.8,
+    #                     "center": [cx, cy, cz], "dimensions": [w, h, d],
+    #                     "train_speed": 0.0, "obstacle_speed": 0.0
+    #                 })
+    #         self.past_tracks = updated_past_tracks
+    #         return final_safe_objects
+
+    #     # Холодный старт цепочки при первом появлении объектов в сессии
+    #     if not self.past_tracks:
+    #         new_tracks = []
+    #         for obj in current_frame_objects:
+    #             self.track_id_counter += 1
+    #             cx, cy, cz = obj["center"]
+    #             w, h, d = obj["dimensions"]
+                
+    #             track_state = {
+    #                 "id": self.track_id_counter, "center": [cx, cy, cz], "dimensions": [w, h, d],
+    #                 "hits": 1, "age": 0
+    #             }
+    #             new_tracks.append(track_state)
+    #         self.past_tracks = new_tracks
+    #         print(f" 🛰️ [Трекер межкадровый]: Накопление истории... Подтверждено треков: 0", flush=True)
+    #         return []
+
+    #     # Извлекаем центры для матричного NumPy-расчета расстояний 3D
+    #     curr_centers = np.array([obj["center"] for obj in current_frame_objects]).reshape(-1, 3)
+    #     past_centers = np.array([tr["center"] for tr in self.past_tracks]).reshape(-1, 3)
+
+    #     # Вычисляем Евклидову матрицу расстояний между текущим и прошлым кадром
+    #     dists_3d = np.linalg.norm(curr_centers[:, np.newaxis, :] - past_centers[np.newaxis, :, :], axis=2)
+    #     best_past_indices = np.argmin(dists_3d, axis=1)
+    #     min_dists_3d = np.min(dists_3d, axis=1)
+    #     association_gate_mask = min_dists_3d < 2.0  # Ворота ассоциации объектов между кадрами
+
+    #     matched_past_indices = set()
+    #     new_tracks = []
+
+    #     for i, obj in enumerate(current_frame_objects):
+    #         cx, cy, cz = obj["center"]
+    #         width, height, depth = obj["dimensions"]
+    #         past_track = None
+
+    #         if association_gate_mask[i]:
+    #             past_idx = best_past_indices[i]
+    #             past_track = self.past_tracks[past_idx]
+    #             matched_past_indices.add(past_idx)
+    #             hits = past_track["hits"] + 1
+    #             track_id = past_track["id"]
+    #             age = 0 
+    #         else:
+    #             self.track_id_counter += 1
+    #             track_id = self.track_id_counter
+    #             hits = 1
+    #             age = 0
+
+    #         # Плавное сглаживание габаритов 3D бокса по экспоненте
+    #         if past_track is not None:
+    #             past_w, past_h, past_d = past_track["dimensions"]
+    #             render_w = (past_w * 0.7) + (width * 0.3)
+    #             render_h = (past_h * 0.7) + (height * 0.3)
+    #             render_d = (past_d * 0.7) + (depth * 0.3)
+    #         else:
+    #             render_w, render_h, render_d = width, height, depth
+
+    #         track_state = {
+    #             "id": track_id, "center": [cx, cy, cz], "dimensions": [render_w, render_h, render_d],
+    #             "hits": hits, "age": age
+    #         }
+    #         new_tracks.append(track_state)
+
+    #         # 🛑 ЖЕСТКИЙ ФИЛЬТР ПО ТРЕМ КАДРАМ: Пропускаем преграду, только если она стабильна!
+    #         if hits >= 3:
+    #             final_safe_objects.append({
+    #                 "id": track_id, "class_id": 1, "confidence": 1.0,
+    #                 "center": [cx, cy, cz], "dimensions": [max(0.4, render_w), max(0.4, render_h), max(0.4, render_d)],
+    #                 "train_speed": 0.0, "obstacle_speed": 0.0
+    #             })
+
+    #     # Удерживаем в памяти Coasting-треки, потерявшие пару на один такт
+    #     for j, tr in enumerate(self.past_tracks):
+    #         if j not in matched_past_indices:
+    #             tr["age"] = tr.get("age", 0) + 1
+    #             if tr["age"] <= config.TRACK_MAX_COASTING_AGE:
+    #                 new_tracks.append(tr)
+
+    #     self.past_tracks = new_tracks
+    #     print(f" 🛰️ [Трекер межкадровый]: Подтверждено треков (hits>=3): {len(final_safe_objects)} | Всего треков в памяти: {len(self.past_tracks)}", flush=True)
+    #     return final_safe_objects
 
     # def track_and_filter_ghosts(self, current_frame_objects):
     #     """Промышленный MOT-конвейер межкадровой фильтрации и трекинга скоростей."""

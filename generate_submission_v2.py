@@ -390,7 +390,10 @@ def validate_and_filter_objects(raw_objects, past_tracks=None):
             
     return confirmed_objects
 
-def process_point_cloud(file_path, tracker, is_open_space=False):
+# Было: def process_point_cloud(file_path, tracker, is_open_space=False):
+# Стало: передаем чистый физический шаг поезда от одометрии
+def process_point_cloud(file_path, tracker, train_step_z=0.0, is_open_space=False):
+
     if not file_path.endswith('.bin'):
         return []
     try:
@@ -461,6 +464,7 @@ def process_point_cloud(file_path, tracker, is_open_space=False):
         # Записываем чистые float координаты X, Y, Z в формате списка для JSON
         obj["raw_points"] = downsampled_box_pts[:, :3].astype(float).tolist()
         
+    final_safe_objects = tracker.track_and_filter_ghosts(confirmed_obstacles, train_step_z=train_step_z)
     return final_safe_objects
 
 # def process_point_cloud(file_path, tracker_engine):
