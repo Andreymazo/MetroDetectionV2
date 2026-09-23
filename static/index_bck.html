@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Autonomous Subway 3D Cockpit</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #050505;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        /* Панель телеметрии поверх 3D сцены */
+        #ui-container {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: #00ffcc;
+            background: rgba(10, 15, 30, 0.75);
+            padding: 20px;
+            border-radius: 8px;
+            border: 1px solid #00ffcc;
+            box-shadow: 0 0 15px rgba(0, 255, 204, 0.3);
+            pointer-events: none; /* Чтобы мышка крутила 3D, а не кликала по тексту */
+            min-width: 250px;
+        }
+        h2 { margin: 0 0 10px 0; font-size: 18px; text-transform: uppercase; letter-spacing: 2px; }
+        .telemetry-item { margin: 8px 0; font-size: 14px; font-family: monospace; }
+        
+        /* Тревожный баннер при опасности */
+        #danger-banner {
+            position: absolute;
+            bottom: 40px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(255, 0, 0, 0.85);
+            color: white;
+            padding: 15px 40px;
+            font-size: 24px;
+            font-weight: bold;
+            border-radius: 4px;
+            border: 2px solid white;
+            box-shadow: 0 0 30px rgba(255, 0, 0, 0.6);
+            display: none;
+            letter-spacing: 3px;
+            animation: blink 1s infinite;
+        }
+        @keyframes blink {
+            0% { opacity: 1; }
+            50% { opacity: 0.4; }
+            100% { opacity: 1; }
+        }
+    </style>
+    <!-- Подключаем библиотеку Three.js -->
+    <script src="/static/js/three.min.js"></script>
+    <script src="/static/js/OrbitControls.min.js"></script>
+
+
+</head>
+<body>
+
+    <div id="ui-container">
+        <h2>Subway AI Cockpit</h2>
+        <hr style="border-color: #00ffcc;">
+        <div class="telemetry-item">СВЯЗЬ: <span id="status" style="color: red;">ОТКЛЮЧЕНО</span></div>
+        <div class="telemetry-item">СТАТУС ПУТИ: <span id="track-status" style="color: #00ffcc;">ЧИСТО</span></div>
+        <div class="telemetry-item">ОБЪЕКТЫ НА ПУТЯХ: <span id="obj-count">0</span></div>
+    </div>
+
+    <div id="danger-banner">!!! EMERGENCY BRAKE TRIPPED !!!</div>
+
+    <script>
+        // --- 1. НАСТРОЙКА THREE.JS СЦЕНЫ ---
+        const scene = new THREE.Scene();
+        // Добавляем туман, чтобы тоннель уходил в темноту
+        scene.fog = new THREE.FogExp2(0x050505, 0.03);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+        // Инициализируем управление мышью
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        // Ограничиваем камеру, чтобы оператор случайно не улетел "под текстуры" земли
+        controls.minDistance = 1;
+        controls.maxDistance = 50;
+
+        // Позиционируем камеру (будто мы смотрим из лобового стекла поезда)
+        camera.position.set(0, 1.6, 2); 
+
+        // Добавляем освещение (фары поезда)
+        const headlight = new THREE.PointLight(0xffffff, 2, 50);
+        headlight.position.set(0, 1.6, 1);
+        scene.add(headlight);
+        
+        const ambientLight = new THREE.AmbientLight(0x111111);
+        scene.add(ambientLight);
+
+        // --- 2. СТРОИМ ВИРТУАЛЬНЫЙ ТОННЕЛЬ И РЕЛЬСЫ ---
+        // Рельс левый
+        const railGeometry = new THREE.BoxGeometry(0.1, 0.05, 100);
+        const railMaterial = new THREE.MeshStandardMaterial({ color: 0x555555, roughness: 0.5 });
+        const leftRail = new THREE.Mesh(railGeometry, railMaterial);
+        leftRail.position.set(-0.75, 0.025, -45);
+        scene.add(leftRail);
+
+        // Рельс правый
+        const rightRail = leftRail.clone();
+        rightRail.position.set(0.75, 0.025, -45);
+        scene.add(rightRail);
+
+        // Стенки тоннеля (цилиндр вокруг рельс для антуража)
+        const tunnelGeom = new THREE.CylinderGeometry(4, 4, 100, 16, 1, true);
+        const tunnelMat = new THREE.MeshStandardMaterial({ color: 0x111111, wireframe: true }); // wireframe делает крутую сетку матрицы
+        const tunnel = new THREE.Mesh(tunnelGeom, tunnelMat);
+        tunnel.rotation.x = Math.PI / 2;
+        tunnel.position.set(0, 2, -45);
+        scene.add(tunnel);
+
+
+        // --- 3. ПОДКЛЮЧЕНИЕ К FASTAPI ПО WEBSOCKET ---
+        const ws = new WebSocket("ws://127.0.0.1:8000/ws/monitoring");
+        
+        // Хранилище для 3D-объектов препятствий, чтобы стирать их на каждом новом кадре
+        let activeObstacles = [];
+
+        ws.onopen = () => {
+            document.getElementById("status").innerText = "ПОДКЛЮЧЕНО";
+            document.getElementById("status").style.color = "#00ffcc";
+        };
+
+        ws.onclose = () => {
+            document.getElementById("status").innerText = "ОТКЛЮЧЕНО";
+            document.getElementById("status").style.color = "red";
+        };
+
+// Вспомогательная функция для генерации текстовой плашки (Canvas текстура)
+function createLabelTexture(text, color) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 64;
+    const ctx = canvas.getContext('2d');
+    
+    // Прозрачный фон
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // Настройка шрифта
+    ctx.font = 'Bold 24px monospace';
+    ctx.fillStyle = color;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    
+    // Рисуем текст с небольшим неоновым свечением
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 6;
+    ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+    
+    const texture = new THREE.CanvasTexture(canvas);
+    return texture;
+}
+
+// --- ИДЕАЛЬНОЕ КОМБО: ТЕЛЕМЕТРИЯ В ОКНЕ + 3D HUD НАД ОБЪЕКТОМ ---
+ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+
+    // 1. Очищаем старые 3D объекты и текстовые плашки с предыдущего кадра
+    activeObstacles.forEach(obj => scene.remove(obj));
+    activeObstacles = [];
+
+    // 2. Логика баннеров тревоги и статуса пути в боковом окне
+    const banner = document.getElementById("danger-banner");
+    const trackStatus = document.getElementById("track-status");
+    const objCountSpan = document.getElementById("obj-count");
+    
+    if (data.danger_alert) {
+        banner.style.display = "block";
+        trackStatus.innerText = "ОПАСНОСТЬ";
+        trackStatus.style.color = "red";
+        scene.fog.color.setHex(0x330000); // Красный туман тревоги
+    } else {
+        banner.style.display = "none";
+        trackStatus.innerText = "ЧИСТО";
+        trackStatus.style.color = "#00ffcc";
+        scene.fog.color.setHex(0x050505);
+    }
+
+    // Обновляем базовый счетчик в боковом окне
+    objCountSpan.innerText = data.objects.length;
+
+    // 3. Рисуем новые препятствия и вешаем на них 3D-подписи
+    data.objects.forEach(obj => {
+        const [width, height, depth] = obj.size_3d;
+        const [cx, cy, cz] = obj.center;
+
+        // Вычисляем честную дистанцию (модуль Z)
+        const distance = Math.abs(cz).toFixed(1);
+        const className = (obj.class_id === 1) ? "PERSON" : "OBSTACLE";
+
+        // ДОПЛАТА: Выводим подробный лог в боковое окно
+        objCountSpan.innerHTML = `${data.objects.length} <br><span style="color: #ff3333; font-size:12px;">[${className} | ${distance}м]</span>`;
+
+        // Строим 3D куб объекта
+        const boxGeom = new THREE.BoxGeometry(width, height, depth);
+        const color = (obj.class_id === 1) ? 0xff0000 : 0xffaa00;
+        const boxMat = new THREE.MeshStandardMaterial({ 
+            color: color, 
+            emissive: color, 
+            emissiveIntensity: 0.3 
+        });
+        const obstacleMesh = new THREE.Mesh(boxGeom, boxMat);
+        obstacleMesh.position.set(cx, cy, cz);
+        scene.add(obstacleMesh);
+        activeObstacles.push(obstacleMesh); // Запоминаем для очистки
+
+        // --- ДОБАВЛЕНИЕ 3D HUD (ТЕКСТ НАД КУБОМ) ---
+        // Создаем динамический холст (Canvas) для генерации текстуры текста
+        const canvas = document.createElement('canvas');
+        canvas.width = 256;
+        canvas.height = 64;
+        const ctx = canvas.getContext('2d');
+        
+        // Рисуем подложку и текст на холсте
+        ctx.fillStyle = 'rgba(10, 15, 30, 0.8)'; // Темный полупрозрачный фон
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.strokeStyle = (obj.class_id === 1) ? '#ff0000' : '#ffaa00'; // Рамка в цвет объекта
+        ctx.lineWidth = 4;
+        ctx.strokeRect(0, 0, canvas.width, canvas.height);
+        
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 20px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${className} | ${distance}m`, canvas.width / 2, 40);
+
+        // Переносим холст на 3D-текстуру
+        const texture = new THREE.CanvasTexture(canvas);
+        const spriteMaterial = new THREE.SpriteMaterial({ map: texture });
+        const textSprite = new THREE.Sprite(spriteMaterial);
+        
+        // Масштабируем плашку, чтобы она была читаемой в 3D
+        textSprite.scale.set(3, 0.75, 1);
+        // Позиционируем строго НАД объектом (берём центр по Y + половина высоты объекта + зазор 0.4м)
+        textSprite.position.set(cx, cy + (height / 2) + 0.4, cz);
+        
+        scene.add(textSprite);
+        activeObstacles.push(textSprite); // Добавляем в массив очистки вместе с кубом
+    });
+};
+
+
+
+        // --- 4. ИГРОВОЙ ЦИКЛ РЕНДЕРА (АНИМАЦИЯ) ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // ОБНОВЛЕНИЕ: Заставляем мышку плавно вращать сцену
+            controls.update();
+
+            // Переносим эффект покачивания поезда на внутреннее смещение камеры, 
+            // чтобы оно больше НЕ блокировало ручное вращение мыши!
+            camera.position.y += Math.sin(Date.now() * 0.005) * 0.0002;
+
+            // ВЕКТОРНАЯ ПРОЕКЦИЯ: Привязываем 2D текст к 3D объектам на экране
+            activeObstacles.forEach(item => {
+                // ... (весь ваш внутренний код проекции текста остается без изменений) ...
+            });
+
+            renderer.render(scene, camera);
+        }
+
+
+        // Корректное изменение размеров окна браузера
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+    </script>
+</body>
+</html>

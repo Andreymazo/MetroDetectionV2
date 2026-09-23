@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Autonomous Subway 3D Cockpit</title>
+    <style>
+       body { 
+    margin: 0; 
+    padding: 0; 
+    overflow: hidden; 
+    background-color: #050505; 
+    font-family: sans-serif; 
+}
+
+/* ЛЕВЫЙ ВЕРХНИЙ УГОЛ: Компактное окошко для препятствий */
+#ui-container { 
+    position: absolute; 
+    top: 20px; 
+    left: 20px; 
+    color: #00ffcc; 
+    background: rgba(10, 15, 30, 0.9); 
+    padding: 20px; 
+    border-radius: 8px; 
+    border: 1px solid #00ffcc; 
+    box-shadow: 0 0 15px rgba(0,255,204,0.3); 
+    width: 260px; 
+    z-index: 1000; 
+}
+
+h2 { 
+    margin: 0 0 10px 0; 
+    font-size: 16px; 
+    text-transform: uppercase; 
+    letter-spacing: 2px; 
+}
+
+.telemetry-item { 
+    margin: 8px 0; 
+    font-size: 13px; 
+    font-family: monospace; 
+}
+
+/* Окошко препятствий: ограничено по высоте, при наплыве целей включается скролл */
+#danger-targets-list {
+    margin-top: 10px; 
+    font-family: monospace; 
+    font-size: 11px; 
+    max-height: 180px; 
+    overflow-y: auto; 
+    border-top: 1px dashed rgba(0,255,204,0.3); 
+    padding-top: 8px;
+}
+
+/* ПРАВЫЙ ВЕРХНИЙ УГОЛ: Метрики + Кнопка Паузы сверху */
+#hud-telemetry { 
+    position: absolute; 
+    top: 20px; 
+    right: 20px; 
+    background: rgba(4, 8, 16, 0.95); 
+    color: #00ffcc; 
+    padding: 20px; 
+    font-family: 'Courier New', monospace; 
+    border-radius: 12px; 
+    border: 2px solid #00ffcc; 
+    z-index: 1000; 
+    width: 320px; 
+    box-shadow: 0 0 25px rgba(0,255,204,0.3); 
+    pointer-events: auto; /* Чтобы кнопка нажималась */
+}
+
+/* Кнопка Паузы — теперь СВЕРХУ ПРАВОЙ ПАНЕЛИ, всегда доступна для клика */
+#pause-btn { 
+    display: block;
+    width: 100%; 
+    background: rgba(5,10,20,0.9); 
+    color: #00ffcc; 
+    border: 1px solid #00ffcc; 
+    padding: 12px; 
+    font-family: monospace; 
+    font-weight: bold; 
+    text-transform: uppercase; 
+    cursor: pointer; 
+    border-radius: 4px; 
+    transition: all 0.3s ease; 
+    box-shadow: 0 0 10px rgba(0,255,204,0.2); 
+    margin-bottom: 20px; /* Отступ до метрик */
+}
+
+#pause-btn:hover { 
+    background: rgba(0,255,204,0.2); 
+    box-shadow: 0 0 20px rgba(0,255,204,0.5); 
+}
+
+.hud-title {
+    font-weight: bold; 
+    font-size: 13px;
+    border-bottom: 2px solid #00ffcc; 
+    padding-bottom: 8px; 
+    margin-bottom: 15px; 
+    letter-spacing: 1px;
+    text-transform: uppercase;
+}
+
+.hud-value-container {
+    margin-bottom: 15px;
+}
+
+.hud-label {
+    font-size: 11px;
+    color: #88aaff;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.hud-big-number {
+    font-size: 38px; 
+    font-weight: 900; 
+    color: #ffffff; 
+    text-shadow: 0 0 10px rgba(255,255,255,0.4), 0 0 20px #00ffcc;
+    font-family: sans-serif;
+    line-height: 40px;
+    margin-top: 4px;
+}
+
+.hud-unit {
+    font-size: 14px;
+    color: #00ffcc;
+    font-weight: normal;
+    margin-left: 6px;
+}
+
+/* Аварийный баннер торможения по центру внизу */
+#danger-banner { 
+    position: absolute; 
+    bottom: 40px; 
+    left: 50%; 
+    transform: translateX(-50%); 
+    background: rgba(255,0,0,0.85); 
+    color: white; 
+    padding: 15px 40px; 
+    font-size: 24px; 
+    font-weight: bold; 
+    border-radius: 4px; 
+    border: 2px solid white; 
+    box-shadow: 0 0 30px rgba(255,0,0,0.6); 
+    display: none; 
+    letter-spacing: 3px; 
+    animation: blink 1s infinite; 
+    z-index: 1000; 
+}
+
+@keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
+
+    </style>
+    <script src="/static/js/three.min.js"></script>
+    <script src="/static/js/OrbitControls.min.js"></script>
+</head>
+<body>
+
+<!-- ПРАВАЯ ПАНЕЛЬ: Кнопка паузы + Чистые большие метрики -->
+<div id="hud-telemetry">
+    <!-- Кнопка паузы железно стоит здесь сверху справа и никуда не уплывает -->
+    <button id="pause-btn" onclick="togglePause()">II ПАУЗА СИСТЕМЫ</button>
+
+    <div class="hud-title">📡 БОРТОВАЯ ТЕЛЕМЕТРИЯ ЦОС</div>
+    
+    <div class="hud-value-container">
+        <div class="hud-label">Скорость состава:</div>
+        <div class="hud-big-number"><span id="hud-train-speed">0.0</span><span class="hud-unit">км/ч</span></div>
+    </div>
+    
+    <div class="hud-value-container">
+        <div class="hud-label">Пройденный путь:</div>
+        <div class="hud-big-number" style="color: #00ffcc;"><span id="hud-total-dist">0.0</span><span class="hud-unit" style="color: #fff;">м</span></div>
+    </div>
+
+    <div class="hud-value-container" style="margin-bottom: 0;">
+        <div class="hud-label">Дистанция до преграды:</div>
+        <div id="hud-obs-box" class="hud-big-number" style="color: #00ffcc; font-size: 28px;">
+            <span id="hud-obs-speed">ЧИСТО</span>
+        </div>
+    </div>
+</div>
+
+<!-- ЛЕВАЯ ПАНЕЛЬ: Системные статусы связи и динамическое окошко препятствий -->
+<div id="ui-container">
+    <h2>Subway AI Cockpit</h2>
+    <hr style="border-color: #00ffcc; margin-bottom: 12px;">
+    <div class="telemetry-item">СВЯЗЬ: <span id="status" style="color: red;">ОТКЛЮЧЕНО</span></div>
+    <div class="telemetry-item">СТАТУС ПУТИ: <span id="track-status" style="color: #00ffcc;">ЧИСТО</span></div>
+    <div class="telemetry-item">ОПОРНЫЕ ЯКОРНЫЕ ОБЪЕКТЫ: <span id="obj-count">0</span></div>
+    
+    <!-- Сюда скрипт безопасно добавляет препятствия со скроллом, не раздувая пульт -->
+    <div id="danger-targets-list"></div>
+</div>
+
+<div id="danger-banner">!!! EMERGENCY BRAKE TRIPPED !!!</div>
+
+<script>
+
+const hudCanvas = document.createElement('canvas');
+hudCanvas.width = 320; hudCanvas.height = 80;
+const hudCtx = hudCanvas.getContext('2d');
+
+let isPaused = false;
+let needNextFrame = false;
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x050505, 0.03);
+
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.minDistance = 1; controls.maxDistance = 50;
+camera.position.set(0, 1.6, 2); // Высота взгляда машиниста — 1.6м
+
+const headlight = new THREE.PointLight(0xffffff, 2, 50);
+headlight.position.set(0, 1.6, 1);
+scene.add(headlight);
+scene.add(new THREE.AmbientLight(0x111111));
+
+const railMaterial = new THREE.MeshStandardMaterial({ color: 0x555555, roughness: 0.5 });
+const tunnelMat = new THREE.MeshStandardMaterial({ color: 0x111111, wireframe: true });
+
+let activeObstacles = [];
+let currentTrackComponents = [];
+
+// 🔥 ПРАВИЛЬНАЯ ГЕОМЕТРИЯ ПУТИ: Возвращаем Math.max(0, z_abs), чтобы выровнять натяжение рельс под полом кабины
+function createStraightPath(xOffset, yOffset) {
+    const points = [];
+    for (let z_abs = -5; z_abs <= 100; z_abs += 2) {
+        const current_z = Math.max(0, z_abs); 
+        const z_scene = -z_abs;
+        // Идеально прямая линия по X = xOffset без парабол
+        points.push(new THREE.Vector3(xOffset, yOffset, z_scene));
+    }
+    return new THREE.CatmullRomCurve3(points);
+}
+
+const ws = new WebSocket("ws://127.0.0.1:8000/ws/monitoring");
+
+ws.onopen = () => {
+    document.getElementById("status").innerText = "ПОДКЛЮЧЕНО";
+    document.getElementById("status").style.color = "#00ffcc";
+    needNextFrame = true;
+};
+
+ws.onclose = () => {
+    document.getElementById("status").innerText = "ОТКЛЮЧЕНО";
+    document.getElementById("status").style.color = "red";
+    needNextFrame = false;
+};
+
+function togglePause() {
+    isPaused = !isPaused;
+    const btn = document.getElementById("pause-btn");
+    if (isPaused) {
+        btn.innerText = "▶ ПРОДОЛЖИТЬ"; btn.style.color = "#ff3333"; btn.style.borderColor = "#ff3333";
+        btn.style.boxShadow = "0 0 15px rgba(255, 51, 51, 0.4)";
+    } else {
+        btn.innerText = "II ПАУЗА СИСТЕМЫ"; btn.style.color = "#00ffcc"; btn.style.borderColor = "#00ffcc";
+        btn.style.boxShadow = "0 0 10px rgba(0,255,204,0.2)";
+        needNextFrame = true;
+    }
+}
+// Пауза по нажатию на ПРОБЕЛ
+window.addEventListener('keydown', (event) => {
+    if (event.code === "Space") {
+        event.preventDefault(); // Запрещаем странице листаться вниз
+        togglePause();
+    }
+});
+ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+
+// 🔍 КОНТРОЛЬНЫЙ ЛОГ ВХОДЯЩЕГО JSON ПАКЕТА
+console.log("===[WS ТАКТ]=== Всего объектов:", data.objects ? data.objects.length : 0);
+if (data.objects) {
+    const counts = { walls: 0, obstacles: 0, rails: 0 };
+    data.objects.forEach(o => {
+        if (o.class_id === 0) counts.walls++;
+        if (o.class_id === 1) counts.obstacles++;
+        if (o.class_id === 2) counts.rails++;
+    });
+    console.log(`   ↳ Распределение классов ИИ -> Стены(0): ${counts.walls} | Препятствия(1): ${counts.obstacles} | ОЯР(2): ${counts.rails}`);
+}
+
+    
+    // === 1. ЖЕЛЕЗОБЕТОННОЕ ОБНОВЛЕНИЕ БОЛЬШИХ НЕОНОВЫХ ЦИФР СПРАВА ===
+    if (data.train_speed_kmh !== undefined) {
+        document.getElementById("hud-train-speed").innerText = data.train_speed_kmh.toFixed(1);
+    }
+    if (data.total_distance_m !== undefined) {
+        document.getElementById("hud-total-dist").innerText = data.total_distance_m.toFixed(1);
+    }
+
+    const obsBox = document.getElementById("hud-obs-box");
+    const obsSpeedSpan = document.getElementById("hud-obs-speed");
+
+    if (data.distance_to_obstacle_m !== undefined && data.distance_to_obstacle_m > 0) {
+        obsBox.style.color = "#ff3333";
+        obsBox.style.textShadow = "0 0 10px #ff3333";
+        obsSpeedSpan.innerHTML = `${data.distance_to_obstacle_m.toFixed(1)}<span class="hud-unit" style="color: #ff3333;">м</span>`;
+    } else {
+        obsBox.style.color = "#00ffcc";
+        obsBox.style.textShadow = "0 0 15px #00ffcc";
+        obsSpeedSpan.innerHTML = "ЧИСТО";
+    }
+
+    // === 2. СТАНДАРТНАЯ ОЧИСТКА 3D СЦЕНЫ В МЕМОРИ ===
+    activeObstacles.forEach(obj => scene.remove(obj));
+    activeObstacles = [];
+    
+    currentTrackComponents.forEach(comp => {
+        scene.remove(comp);
+        if (comp.geometry) comp.geometry.dispose();
+    });
+    currentTrackComponents = [];
+
+    // ГЕНЕРАЦИЯ СТАТИЧЕСКИХ РЕЛЬС И СЕТКИ ТOННЕЛЯ ПОД КАБИНОЙ
+    const trackGauge = 0.75;
+    const leftRailPath = createStraightPath(-trackGauge, 0.025);
+    const rightRailPath = createStraightPath(trackGauge, 0.025);
+    const leftRailGeom = new THREE.TubeGeometry(leftRailPath, 64, 0.05, 4, false);
+    const rightRailGeom = new THREE.TubeGeometry(rightRailPath, 64, 0.05, 4, false);
+    const leftRailMesh = new THREE.Mesh(leftRailGeom, railMaterial);
+    const rightRailMesh = new THREE.Mesh(rightRailGeom, railMaterial);
+    leftRailMesh.scale.set(1, 0.3, 1); rightRailMesh.scale.set(1, 0.3, 1);
+    scene.add(leftRailMesh); scene.add(rightRailMesh);
+    currentTrackComponents.push(leftRailMesh, rightRailMesh);
+    
+    const tunnelPath = createStraightPath(0.0, 2.0);
+    const tunnelGeometry = new THREE.TubeGeometry(tunnelPath, 32, 4.0, 16, false);
+    const tunnelMesh = new THREE.Mesh(tunnelGeometry, tunnelMat);
+    scene.add(tunnelMesh);
+    currentTrackComponents.push(tunnelMesh);
+
+    const banner = document.getElementById("danger-banner");
+    const trackStatus = document.getElementById("track-status");
+    const objCountSpan = document.getElementById("obj-count");
+    const targetsListContainer = document.getElementById("danger-targets-list");
+    
+    targetsListContainer.innerHTML = ""; // Очищаем список целей на левом пульте
+
+    const realObjects = data.objects.filter(obj => obj.class_id !== -1);
+    const hasDanger = data.danger_alert && realObjects.length > 0;
+
+    if (hasDanger) {
+        banner.style.display = "block"; 
+        trackStatus.innerText = "ОПАСНОСТЬ"; 
+        trackStatus.style.color = "red";
+        scene.fog.color.setHex(0x330000);
+    } else {
+        banner.style.display = "none"; 
+        trackStatus.innerText = "ЧИСТО"; 
+        trackStatus.style.color = "#00ffcc";
+        scene.fog.color.setHex(0x050505);
+    }
+    objCountSpan.innerText = realObjects.length;
+    // Ищем рельсовый якорь в массиве пришедших объектов
+    const currentRailObj = data.objects.find(obj => obj.class_id === 2);
+    const railStatusSpan = document.getElementById("track-status");
+
+    if (currentRailObj) {
+        const railTtl = currentRailObj.ttl !== undefined ? currentRailObj.ttl : 6;
+        // Подмешиваем к статусу пути информацию о стабильности ОЯР-зацепа за шпалы
+        railStatusSpan.innerHTML += ` <span style="color: #ffaa00; font-size: 11px; font-weight: normal; margin-left: 8px;">[🛤️ ОЯР: ${railTtl}t]</span>`;
+    }
+
+    // 🔥 ФИНАЛЬНЫЙ ИСПРАВЛЕННЫЙ ХИРУРГИЧЕСКИЙ СОРТ:
+    // Сортируем объекты по честной координате глубины Z (индекс 2 массива center)
+    realObjects.sort((a, b) => b.center[2] - a.center[2]);
+
+        // =================================================================
+    // 🔥 ЖЕЛЕЗОБЕТОННАЯ ЗАМЕНА: ОТРИСОВКА КУБОВ И ЯКОРЕЙ СТЕН СТРОГО ПО КЛАССАМ ИИ
+    // =================================================================
+    realObjects.forEach((obj, idx) => {
+        const [width, height, depth] = obj.size_3d;
+        const [cx, cy, cz] = obj.center; 
+        const distance = Math.abs(cz);
+        const objId = obj.id !== undefined ? obj.id : "?";
+
+        if (obj.class_id === 1) {
+        // =================================================================
+        // ВАРИАНТ А: ПРЕПЯТСТВИЕ НА ПУТЯХ (class_id === 1) - УМНЫЙ ЦВЕТ И ТЕКСТ
+        // =================================================================
+        const className = "OBSTACLE";
+        const posText = obj.position_text !== undefined ? obj.position_text : "Препятствие";
+        const shapeText = obj.shape_text !== undefined ? obj.shape_text : "Объект";
+
+        // 🟢 ДОБАВЛЯЕМ ДОПОЛНИТЕЛЬНЫЙ ЛОГ О ФОРМЕ ПРЯМО В КОНСОЛЬ БРАУЗЕРА (F12)
+        // [ИИ-АНАЛИТИКА ЦЕЛЬ ID:\${objId}] Форма из JSON: "shapeText" | Позиция: "{posText}"
+        console.log(` [ИИ-АНАЛИТИКА ЦЕЛЬ ID:${objId}] Форма из JSON: "${shapeText}" | Позиция: "${posText}"`);
+
+        let uiColor = "#ffaa00"; 
+        let threeColor = 0xffaa00;
+
+        // 🟢 ИСПРАВЛЕНИЕ: Добавляем обработку левой и правой кромки путей для корректной работы цвета
+        if (obj.position_status === "CENTER") {
+            uiColor = "#ff3333"; 
+            threeColor = 0xff3333; // Красный неон для центра
+        } else if (obj.position_status === "LEFT_EDGE" || obj.position_status === "RIGHT_EDGE") {
+            uiColor = "#ff7700"; 
+            threeColor = 0xff7700; // Насыщенный оранжевый неон для платформ и стрелок
+        }
+
+        targetsListContainer.innerHTML += `
+        <div style="color: ${uiColor}; margin-bottom: 8px; padding: 8px; background: rgba(255,255,255,0.03); border-left: 4px solid ${uiColor}; border-radius: 4px; font-family: monospace; line-height: 14px;">
+        <span style="font-weight: bold; color: #fff;">[ID: ${objId}] ${className}</span><br>
+        Форма: <span style="color: #fff;">${shapeText}</span><br>
+        Дистанция: <span style="color: #00ffcc; font-weight: bold;">${distance.toFixed(1)}м</span><br>
+        Позиция: <span style="font-weight: bold;">${posText}</span>
+        </div>
+        `;
+
+        // === НАЧАЛО АДАПТИВНОГО МОРФОЛОГИЧЕСКОГО БЛОКА ===
+        let obstacleGeometry;
+
+        if (shapeText.includes("Человек") || shapeText.includes("Вертикальная")) {
+            const radius = Math.max(0.2, Math.min(width, depth) / 2);
+            obstacleGeometry = new THREE.CylinderGeometry(radius, radius, height, 16);
+        } else if (shapeText.includes("Плоский") || shapeText.includes("Настил")) {
+            obstacleGeometry = new THREE.BoxGeometry(width, Math.max(0.1, height), depth);
+        } else {
+            obstacleGeometry = new THREE.BoxGeometry(width, height, depth);
+        }
+
+        const boxMat = new THREE.MeshStandardMaterial({ 
+            color: threeColor, 
+            emissive: threeColor, 
+            emissiveIntensity: 0.3,
+            transparent: true,
+            opacity: 0.25, // Делаем куб полупрозрачным, чтобы видеть лазерные точки внутри!
+            roughness: 0.2
+        });
+        // === КОНЕЦ АДАПТИВНОГО МОРФОЛОГИЧЕСКОГО БЛОКА ===
+
+        const obstacleMesh = new THREE.Mesh(obstacleGeometry, boxMat);
+        
+        // Включаем небольшую прозрачность для габаритного бокса, чтобы сквозь него были видны точки (если коробка включена)
+        boxMat.transparent = true;
+        boxMat.opacity = 0.25; 
+
+        obstacleMesh.position.set(cx, cy, cz);
+
+        // 🟢 ИИ-ШЛЮЗ РЕНДЕРИНГА: Проверяем флаг из конфига бэкэнда!
+        // Если в config.py выставлено False — мы просто не добавляем коробку на 3D-сцену,
+        // но сам объект в памяти оставляем, так как к нему привязываются текстовые спрайты
+        if (data.show_mesh_boxes === true || data.show_mesh_boxes === undefined) {
+            scene.add(obstacleMesh);
+            activeObstacles.push(obstacleMesh);
+        }
+
+        // =========================================================================
+        // 🟢 ИСПРАВЛЕННЫЙ КОНТУР: СВЕТЯЩЕЕСЯ ЛАЗЕРНОЕ ОБЛАКО ТОЧЕК ВНУТРИ КУБА
+        // =========================================================================
+        if (obj.obstacle_points && obj.obstacle_points.length > 0) {
+             // 🔍 ЭКСПРЕСС-АУДИТ ТОЧЕК НА ФРОНТЕНДЕ:
+            console.log(`📡 [ДАТЧИК ТОЧЕК]: Для объекта ID:${objId} успешно доставлено ${obj.obstacle_points.length} лазерных точек.`);
+    
+            const obstacleGeom = new THREE.BufferGeometry();
+            const positions = [];
+
+            obj.obstacle_points.forEach(pt => {
+                positions.push(pt[0], pt[1], pt[2]);
+            });
+
+            obstacleGeom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+
+            const obsPointsMaterial = new THREE.PointsMaterial({
+                color: threeColor, 
+                size: 0.18,        // Слегка увеличиваем размер лазерных точек для сочности
+                transparent: true,
+                opacity: 0.95,
+                blending: THREE.AdditiveBlending 
+            });
+
+            const obstaclePointsMesh = new THREE.Points(obstacleGeom, obsPointsMaterial);
+            scene.add(obstaclePointsMesh);
+            activeObstacles.push(obstaclePointsMesh);
+        }
+        // =========================================================================
+
+
+
+
+        // ДИНАМИЧЕСКИЙ 2D-СПРАЙТ ТЕКСТА НАД ГОЛОВОЙ 3D-КОРОБКИ УГРОЗЫ (С УМНЫМ ЦВЕТОМ)
+        hudCtx.clearRect(0, 0, hudCanvas.width, hudCanvas.height);
+        hudCtx.fillStyle = 'rgba(5, 8, 15, 0.9)'; 
+        hudCtx.fillRect(0, 0, hudCanvas.width, hudCanvas.height);
+        hudCtx.strokeStyle = uiColor; 
+        hudCtx.lineWidth = 4;
+        hudCtx.strokeRect(0, 0, hudCanvas.width, hudCanvas.height);
+        hudCtx.fillStyle = '#ffffff'; 
+        hudCtx.font = 'bold 16px monospace'; 
+        hudCtx.textAlign = 'center';
+        hudCtx.fillText(`ID:${objId} | ${distance.toFixed(1)}m`, hudCanvas.width / 2, 32);
+        hudCtx.fillStyle = uiColor;
+        hudCtx.font = '12px monospace';
+        hudCtx.fillText(posText, hudCanvas.width / 2, 58);
+
+        const texture = new THREE.CanvasTexture(hudCanvas);
+        const spriteMaterial = new THREE.SpriteMaterial({ map: texture });
+        const textSprite = new THREE.Sprite(spriteMaterial);
+        textSprite.scale.set(3.5, 0.875, 1);
+        textSprite.position.set(cx, cy + (height / 2) + 0.5, cz);
+        scene.add(textSprite);
+        activeObstacles.push(textSprite);
+
+        } else if (obj.class_id === 0) {
+            // =================================================================
+            // ВАРИАНТ Б: МАКРО-ЯКОРЬ ОДОМЕТРИИ СТЕНЫ (ИСТИННАЯ ЛАЗЕРНАЯ ФОРМА ОЯО)
+            // =================================================================
+            if (obj.wall_points && obj.wall_points.length > 0) {
+                const geometry = new THREE.BufferGeometry();
+                const positions = [];
+
+                // Распаковываем массив трехмерных точек, присланный бэкендом
+                obj.wall_points.forEach(pt => {
+                    positions.push(pt[0], pt[1], pt[2]);
+                });
+
+                geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+
+                // Создаем материал светящихся бирюзовых лазерных точек (стиль Киберпанк)
+                const pointsMaterial = new THREE.PointsMaterial({
+                    color: 0x00ffcc,
+                    size: 0.12,                     // Физический размер вокселя лазера на холсте
+                    transparent: true,
+                    opacity: 0.8,
+                    blending: THREE.AdditiveBlending // Эффект неонового свечения при наложении лучей
+                });
+
+                const wallPointsMesh = new THREE.Points(geometry, pointsMaterial);
+                scene.add(wallPointsMesh);
+                activeObstacles.push(wallPointsMesh);
+
+               
+            }
+        } else if (obj.class_id === 2) {
+    // =================================================================
+    // ВАРИАНТ В: АКТИВНЫЙ РЕЛЬСОВЫЙ ЯКОРЬ ОЯР НА ПОЛУ (class_id === 2)
+    // =================================================================
+    // 🔍 КОНТРОЛЬНЫЙ ЛОГ СОЗДАНИЯ 3D-ОБЪЕКТА НА СЦЕНЕ
+    console.log(`   💥 [THREE.JS ОЯР]: Создаю плиту ID:${obj.id} | Центр: [${cx.toFixed(2)}, ${cy.toFixed(2)}, ${cz.toFixed(2)}] | Размер: [${width.toFixed(2)}, ${height.toFixed(2)}, ${depth.toFixed(2)}]`);
+
+    // Создаем прецизионную маркерную плиту зацепа одометрии за шпалы
+    const railAnchorGeom = new THREE.BoxGeometry(width, height, depth);
+    
+    // Применяем яркий неоновый материал, чтобы оператор видел точку сцепления лазера
+    const railAnchorMat = new THREE.MeshStandardMaterial({ 
+        color: 0x00ffcc, 
+        emissive: 0x00ffcc, 
+        emissiveIntensity: 0.8,
+        transparent: true,
+        opacity: 0.6
+    });
+    
+    const railAnchorMesh = new THREE.Mesh(railAnchorGeom, railAnchorMat);
+    railAnchorMesh.position.set(cx, cy, cz);
+    scene.add(railAnchorMesh);
+    activeObstacles.push(railAnchorMesh);
+
+    // Добавляем тонкий проволочный каркас (Wireframe) для эффекта голограммы
+    const wireframeGeom = new THREE.EdgesGeometry(railAnchorGeom);
+    const wireframeMat = new THREE.LineBasicMaterial({ color: 0xffffff, linewidth: 2 });
+    const wireframe = new THREE.LineSegments(wireframeGeom, wireframeMat);
+    wireframe.position.set(cx, cy, cz);
+    scene.add(wireframe);
+    activeObstacles.push(wireframe);
+}
+
+    }); // <-- Закрылся цикл realObjects.forEach
+
+    // 🔥 СИГНАЛ PULL-МОДЕЛИ:
+    // Кадр полностью отрендерен на GPU — разрешаем запрос следующего пакета лидара
+    needNextFrame = true; 
+}; // <-- Закрылась функция ws.onmessage
+
+
+
+
+function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    camera.position.y += Math.sin(Date.now() * 0.005) * 0.0002;
+    renderer.render(scene, camera);
+    
+    // ЖЕЛЕЗОБЕТОННАЯ СИНХРОНИЗАЦИЯ PULL-МОДЕЛИ:
+    if (needNextFrame && !isPaused && ws.readyState === WebSocket.OPEN) {
+        needNextFrame = false; 
+        ws.send("READY_FOR_NEXT_FRAME");
+    }
+}
+
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// Запуск бесконечного цикла визуализации кабины
+animate();
+</script>
+</body>
+</html>

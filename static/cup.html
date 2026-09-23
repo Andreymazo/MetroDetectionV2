@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>ЦУП Мосметро — Ситуационный центр беспилотного движения</title>
+    <style>
+        body {
+            margin: 0; padding: 20px;
+            background-color: #0b0f19; color: #e2e8f0;
+            font-family: 'Segoe UI', monospace;
+        }
+        h1 { margin: 0 0 5px 0; font-size: 24px; color: #ffaa00; letter-spacing: 2px; text-transform: uppercase; }
+        .subtitle { color: #64748b; font-size: 14px; margin-bottom: 25px; }
+        
+        /* Таблица мониторинга поездов */
+        table { width: 100%; border-collapse: collapse; background: #131926; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.4); }
+        th, td { padding: 15px 20px; text-align: left; border-bottom: 1px solid #1e293b; }
+        th { background-color: #1e293b; color: #94a3b8; font-size: 13px; text-transform: uppercase; letter-spacing: 1px; }
+        
+        /* Статусы линий */
+        .status-badge { padding: 5px 12px; border-radius: 4px; font-weight: bold; font-size: 12px; display: inline-block; }
+        .status-ok { background: rgba(0, 255, 204, 0.15); color: #00ffcc; border: 1px solid #00ffcc; }
+        .status-alarm { background: rgba(255, 0, 0, 0.2); color: #ff3333; border: 1px solid #ff3333; animation: pulse 1s infinite; }
+        
+        /* Окно глобального лога инцидентов */
+        #cup-log {
+            margin-top: 30px; background: #020617; border: 1px solid #334155;
+            border-radius: 6px; padding: 15px; font-size: 13px;
+        }
+        .log-title { color: #94a3b8; margin-bottom: 10px; font-weight: bold; text-transform: uppercase; font-size: 12px; }
+        .log-window { height: 180px; overflow-y: auto; color: #38bdf8; }
+        .log-row { margin: 6px 0; font-family: monospace; }
+        .log-row.alarm { color: #f87171; font-weight: bold; }
+
+        @keyframes pulse { 0% { opacity: 0.6; } 50% { opacity: 1; } 100% { opacity: 0.6; } }
+    </style>
+</head>
+<body>
+
+    <h1>Центр Управления Поездами (ЦУП) — Ситуационный экран</h1>
+    <div class="subtitle">Автоматизированная система диспетчерского контроля беспилотного состава Мосметро</div>
+
+    <!-- Мониторинг линий -->
+    <table>
+        <thead>
+            <tr>
+                <th>ID Состава</th>
+                <th>Линия / Перегон</th>
+                <th>Режим Управления</th>
+                <th>Текущая скорость</th>
+                <th>Статус безопасности</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr id="train-row-01">
+                <td><strong style="color: #38bdf8;">СОСТАВ №01</strong></td>
+                <td>Большая кольцевая / Тоннель БКЛ-2</td>
+                <td>🤖 АВТОПИЛОТ (ИИ)</td>
+                <td id="train-speed">72 км/ч</td>
+                <td><span id="train-status" class="status-badge status-ok">НОРМА</span></td>
+            </tr>
+            <tr>
+                <td>СОСТАВ №02</td>
+                <td>Сокольническая / Охотный Ряд — Лубянка</td>
+                <td>🤖 АВТОПИЛОТ (ИИ)</td>
+                <td>65 км/ч</td>
+                <td><span class="status-badge status-ok">НОРМА</span></td>
+            </tr>
+        </tbody>
+    </table>
+
+    <!-- Лента системных событий -->
+    <div id="cup-log">
+        <div class="log-title">🛰️ Системный лог ЦУП (Реальное время)</div>
+        <div class="log-window" id="log-window">
+            <div class="log-row">[СИСТЕМА] Инициализация телеметрии ЦУП... ок</div>
+            <div class="log-row">[СИСТЕМА] Канал связи с Беспилотным Составом №01 активен.</div>
+        </div>
+    </div>
+
+    <script>
+        // Подключаемся к тому же самому WebSocket-топику сервера
+        const ws = new WebSocket("ws://127.0.0.1:8000/ws/monitoring");
+        const logWindow = document.getElementById("log-window");
+        let lastLoggedDistance = null; // Следит за физическим изменением метров
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            const statusBadge = document.getElementById("train-status");
+            const speedField = document.getElementById("train-speed");
+            const timeStr = new Date().toLocaleTimeString();
+
+            if (data.danger_alert && data.objects && data.objects.length > 0) {
+                // 1. Мгновенно перекрашиваем статус поезда в ЦУПе
+                statusBadge.innerText = "🚨 КРИТ_ОПАСНОСТЬ";
+                statusBadge.className = "status-badge status-alarm";
+                speedField.innerText = "0 км/ч (ЭКСТР_ТОРМОЖЕНИЕ)";
+                speedField.style.color = "#ff3333";
+
+                // 2. ЧИТАЕМ КОНТРАКТ: Достаем первый объект из массива ИИ-детекций
+                const firstObject = data.objects[0];
+                const [cx, cy, cz] = firstObject.center;
+                
+                const rawDist = Math.abs(cz);
+                
+                // Математическое округление до ближайшего целого метра
+                const currentWholeMeter = Math.round(rawDist);
+
+                // 3. ЗОЛОТАЯ СЕРЕДИНА: Строчим новую запись строго при изменении целого метра
+                if (lastLoggedDistance === null || lastLoggedDistance !== currentWholeMeter) {
+                    
+                    // Формируем красивую строку, принудительно зануляя хвостик (.0)
+                    const formattedDist = `${currentWholeMeter}.0`;
+
+                    const newLog = document.createElement("div");
+                    newLog.className = "log-row alarm";
+                    newLog.innerText = `[${timeStr}] ⚠️ ЦУП: СОСТАВ №01 — Торможение! Препятствие на дистанции ${formattedDist}м.`;
+                    
+                    logWindow.appendChild(newLog);
+                    lastLoggedDistance = currentWholeMeter; // Запоминаем текущий шаг
+
+                    // КОНТРОЛЬ ПАМЯТИ: Обрезаем лог сверху, оставляя последние 30 записей
+                    while (logWindow.children.length > 30) {
+                        logWindow.removeChild(logWindow.firstChild);
+                    }
+
+                    logWindow.scrollTop = logWindow.scrollHeight; // Плавный автоскролл вниз
+                }
+            } else {
+                // Возвращаем штатный режим, сбрасываем шаг дистанции при чистом пути
+                statusBadge.innerText = "НОРМА";
+                statusBadge.className = "status-badge status-ok";
+                speedField.innerText = "72 км/ч";
+                speedField.style.color = "#e2e8f0";
+                lastLoggedDistance = null; 
+            }
+        };
+
+
+    </script>
+</body>
+</html>
