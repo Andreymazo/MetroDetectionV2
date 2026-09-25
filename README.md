@@ -107,24 +107,27 @@
 #### Пошаговый алгоритм проверки решения:
 
 #### 🖥️ ТЕРМИНАЛ №1: Старт ИИ-Конвейера в памяти ОЗУ
-```bash
-# 1. Удаление старых контейнеров
+# 1. Сборка Docker-образа из Dockerfile (Выполняется на хосте в корне проекта)
+docker build -t metro_lidar_solution .
+
+# 2. Удаление старых зависших контейнеров с этим именем (для очистки кэша)
 docker rm -f metro_live_container
 
-# 2. Запуск контейнера в фоне
+# 3. Запуск бессмертного контейнера в фоне с пробросом Shared Memory хоста
 docker run -d --network=host --ipc=host \
   --name metro_live_container \
   -v $(pwd):/app \
   metro_lidar_solution \
   sleep infinity
 
-# 3. Вход в контейнер и запуск ноды
+# 4. Вход внутрь созданного живого контейнера
 docker exec -it metro_live_container bash
 
-# Внутри Docker:
+# Внутри Docker терминала:
 export FASTRTPS_DEFAULT_PROFILES_FILE=/app/fastdds_config.xml
 source /opt/ros/humble/setup.bash
 python3 /app/metro_lidar/lidar_detector_node.py --ros-args -p use_sim_time:=false
+
 ```
 *Нода инициализируется, подпишется на топик жюри `/sensing/lidar/hesai128/pointcloud` и уйдет в режим ожидания.*
 
