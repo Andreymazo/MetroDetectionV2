@@ -1,6 +1,0 @@
-source;share/metro_lidar/hook/pythonpath.ps1
-source;share/metro_lidar/hook/pythonpath.dsv
-source;share/metro_lidar/hook/pythonpath.sh
-source;../../build/metro_lidar/share/metro_lidar/hook/pythonpath_develop.ps1
-source;../../build/metro_lidar/share/metro_lidar/hook/pythonpath_develop.dsv
-source;../../build/metro_lidar/share/metro_lidar/hook/pythonpath_develop.sh
