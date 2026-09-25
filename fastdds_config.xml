@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://eprosima.com">
+    <participant profile_name="detached_autonomous_profile" is_default_profile="true">
+        <rtps>
+            <builtin>
+                <discovery_config>
+                    <!-- Говорим FastDDS: если сосед умер, жестко держи его порты открытыми 1 час -->
+                    <leaseDuration>
+                        <sec>3600</sec>
+                        <nanosec>0</nanosec>
+                    </leaseDuration>
+                    <!-- Отключаем агрессивный пинг сокетов при потере пакетов -->
+                    <leaseAnnouncement>
+                        <sec>600</sec>
+                        <nanosec>0</nanosec>
+                    </leaseAnnouncement>
+                </discovery_config>
+            </builtin>
+
+            <!-- Фиксация независимых каналов Shared Memory в ОЗУ -->
+            <propertiesPolicy>
+                <properties>
+                    <property>
+                        <name>fastdds.shm.nested</name>
+                        <value>true</value>
+                    </property>
+                </properties>
+            </propertiesPolicy>
+        </rtps>
+    </participant>
+</profiles>

@@ -1,0 +1,26 @@
+[0.475s] Invoking command in '/app/build/metro_lidar': PYTHONPATH=/app/build/metro_lidar/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/app/install/metro_lidar/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /app/build/metro_lidar/build --no-deps symlink_data
+[0.633s] running develop
+[0.706s] running egg_info
+[0.706s] creating metro_lidar.egg-info
+[0.706s] writing metro_lidar.egg-info/PKG-INFO
+[0.706s] writing dependency_links to metro_lidar.egg-info/dependency_links.txt
+[0.706s] writing entry points to metro_lidar.egg-info/entry_points.txt
+[0.706s] writing requirements to metro_lidar.egg-info/requires.txt
+[0.706s] writing top-level names to metro_lidar.egg-info/top_level.txt
+[0.706s] writing manifest file 'metro_lidar.egg-info/SOURCES.txt'
+[0.708s] reading manifest file 'metro_lidar.egg-info/SOURCES.txt'
+[0.708s] writing manifest file 'metro_lidar.egg-info/SOURCES.txt'
+[0.709s] running build_ext
+[0.710s] Creating /app/install/metro_lidar/lib/python3.10/site-packages/metro-lidar.egg-link (link to .)
+[0.710s] Installing subway_vision_node script to /app/install/metro_lidar/lib/metro_lidar
+[0.710s] 
+[0.710s] Installed /app/build/metro_lidar
+[0.710s] running symlink_data
+[0.710s] creating /app/install/metro_lidar/share
+[0.710s] creating /app/install/metro_lidar/share/ament_index
+[0.711s] creating /app/install/metro_lidar/share/ament_index/resource_index
+[0.711s] creating /app/install/metro_lidar/share/ament_index/resource_index/packages
+[0.711s] symbolically linking /app/build/metro_lidar/resource/metro_lidar -> /app/install/metro_lidar/share/ament_index/resource_index/packages
+[0.711s] creating /app/install/metro_lidar/share/metro_lidar
+[0.711s] symbolically linking /app/build/metro_lidar/package.xml -> /app/install/metro_lidar/share/metro_lidar
+[0.730s] Invoked command in '/app/build/metro_lidar' returned '0': PYTHONPATH=/app/build/metro_lidar/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/app/install/metro_lidar/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /app/build/metro_lidar/build --no-deps symlink_data

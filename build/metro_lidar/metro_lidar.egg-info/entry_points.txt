@@ -1,0 +1,3 @@
+[console_scripts]
+subway_vision_node = metro_lidar.lidar_detector_node:main
+

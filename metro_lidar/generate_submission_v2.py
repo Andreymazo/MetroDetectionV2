@@ -8,7 +8,7 @@ import csv
 import gc
 import numpy as np
 from sklearn.cluster import DBSCAN
-import config
+import metro_lidar.config as config
 
 def filter_selective_load_balancing_v2(points):
     """
@@ -387,16 +387,26 @@ def validate_and_filter_objects(raw_objects, past_tracks=None):
                 
             obj["distance_m"] = round(distance, 1)
             confirmed_objects.append(obj)
-            
+        # 🕵️‍♂️ CHECKPOINT 1: ВЫХОД ИЗ ВАЛИДАТОРА ОБЪЕКТОВ
+    print(f"\n🔍 [ИИ-ЯДРО ➔ CHECKPOINT 1]: Расчет validate_and_filter_objects\n"
+          f"     Всего валидных преград: {len(confirmed_objects)} шт.", flush=True)
+    for idx, c_obj in enumerate(confirmed_objects):
+        print(f"     -> СУЩНОСТЬ #{idx} | Дистанция distance_m: {c_obj.get('distance_m')} м | "
+              f"Центр ИИ [X, Y, Z]: {[round(float(v), 3) for v in c_obj['center']]}", flush=True)
+
     return confirmed_objects
 
 # Было: def process_point_cloud(file_path, tracker, is_open_space=False):
 # Стало: передаем чистый физический шаг поезда от одометрии
 def process_point_cloud(file_path, tracker, train_step_z=0.0, is_open_space=False):
-
+    """
+    Сквозной ИИ-конвейер детекции препятствий (Real-Time Humble Production).
+    Защищен от ложного бампера вагона через 'Режим Гашения Стоянки' с такт-инициализацией.
+    """
     if not file_path.endswith('.bin'):
         return []
     try:
+        # Нативный парсер бинарного облака точек (Инвариантный мост осей)
         raw_points = np.fromfile(file_path, dtype=np.float32).reshape(-1, config.MATRIX_WIDTH_CHANNELS).copy()
     except Exception as e:
         print(f" [CRITICAL]: Ошибка разбора .bin файла: {e}", flush=True)
@@ -406,51 +416,71 @@ def process_point_cloud(file_path, tracker, train_step_z=0.0, is_open_space=Fals
         return []
 
     # 🟢 МОНОЛИТНЫЙ СИНХРОННЫЙ МОСТ ОСЕЙ v12:
-    # Идеально сопоставляем полярность и индексы одометрии и детектора преград
+    # Сопоставляем полярность и индексы одометрии и детектора преград
     points = np.zeros_like(raw_points)
     points[:, 0] = raw_points[:, 0]  # Столбец 0 -> Внутренний X (Ширина путей)
     points[:, 1] = raw_points[:, 2]  # Столбец 2 -> Внутренний Y (Высота над рельсами)
     
-    # СМОТРИ СЮДА: Вместо np.abs() принудительно уводим продольный ход в МИНУС,
-    # чтобы полностью совпасть с массивами одометрии стен и рельс!
+    # Принудительно уводим продольный ход в МИНУС, чтобы полностью совпасть с одометрией стен
     points[:, 2] = -np.abs(raw_points[:, 1])  
-    
     points[:, 3] = raw_points[:, 3]  # Интенсивность
 
-    # Ограничитель плотности лазерного облака кадра
-    # =====================================================================
-    # 🔥 СТАДИЯ 1.2: СЕЛЕКТИВНЫЙ LOAD BALANCING (ФИЛЬТР ДЕТЕКЦИИ ПРЕПЯТСТВИЙ)
-    # =====================================================================
+    # 1. Вызов селективного балансировщика нагрузки ( Load Balancing )
     points = filter_selective_load_balancing_v2(points)
-    # =====================================================================
 
+    # 2. Адаптивное воксельное сжатие 3D-сетки
     points = voxel_downsample_adaptive(points)
     
-    # Живая калибровка бампера вагона
+    # 3. Динамическая селф-калибровка мертвой зоны кабины (уже переведена на abs)
     live_min_z = tracker._calibrate_ego_vehicle_cabin(points)
     
-    # Сегментация пола RANSAC и фильтр криволинейной колеи безопасности
+    # 4. Сегментация пола RANSAC и фильтр криволинейной колеи безопасности вагона
     points_above_floor, floor_points = extract_floor_with_ransac(points)
-    points_inside_gauge = filter_gauge_with_track_bending(points_above_floor, floor_points, live_min_z, is_open_space=is_open_space)
+    points_inside_gauge = filter_gauge_with_track_bending(
+        points_above_floor, floor_points, live_min_z, is_open_space=is_open_space
+    )
 
-    
-    # Твой родной принт диагностики — теперь тут гарантированно пойдут данные!
+    # =====================================================================
+    # 🟢 ИИ-ФИКС: ПРОМЫШЛЕННЫЙ РЕЖИМ ГАШЕНИЯ СТОЯНКИ С ТАКТ-ИНИЦИАЛИЗАЦИЕЙ
+    # =====================================================================
+    # Проверяем, что фаза холодного старта завершена (кабина успешно откалибрована)
+    # и шаг одометрии поезда близок к нулю (поезд гарантированно стоит на месте)
+    if tracker.is_cabin_calibrated and abs(train_step_z) <= 0.01:
+        if len(points_inside_gauge) > 0:
+            # Математически жестко стираем бампер вагона и сцепку на расстоянии 2.62 метра.
+            # Оставляем строго те точки внутри колеи, которые находятся ДАЛЬШЕ 5.5 метров вперед (-5.5)
+            stationary_safe_mask = points_inside_gauge[:, 2] < -5.5
+            points_inside_gauge = points_inside_gauge[stationary_safe_mask]
+    # =====================================================================
+    # =====================================================================
+    # 🟢 ЖЕСТКИЙ ФИЛЬТР МЕРТВОЙ ЗОНЫ ВАГОНА (КОНТРАКТ CONFIG.PY)
+    # =====================================================================
+    # Полностью ликвидирует бампер состава (2.6м) на стоянке и в движении.
+    # Так как ось Z в детекторе v2 отрицательная, мы оставляем строго те точки,
+    # которые находятся ДАЛЬШЕ лимита config.LIDAR_MIN_Z (3.5м) вперед от лидара.
+    if len(points_inside_gauge) > 0:
+        # Условие: точки должны быть меньше -3.5 метров (т.е. -4, -10, -50м вперед)
+        # Всё, что ближе (-2.60м, -2.73м), отсекается со скоростью NumPy конвейера!
+        cabin_clear_mask = points_inside_gauge[:, 2] < -config.LIDAR_MIN_Z
+        points_inside_gauge = points_inside_gauge[cabin_clear_mask]
+    # =====================================================================
+
+    # Твой родной принт диагностики — теперь тут гарантированно пойдут чистые данные!
     print(f" 📊 [Кадр: {os.path.basename(file_path)}] Точек в колее: {len(points_inside_gauge)} | Точек пола: {len(floor_points)}", flush=True)
     
+    # Кластеризация пространственных аномалий внутри очищенной колеи
     raw_detections = find_obstacles_adaptive_density(points_inside_gauge, floor_points)
     confirmed_obstacles = validate_and_filter_objects(raw_detections, tracker.past_tracks)
     
-    final_safe_objects = tracker.track_and_filter_ghosts(confirmed_obstacles)
+    # 🟢 КРИТИЧЕСКИЙ ФИКС: Вызываем трекер СТРОГО ОДИН раз за кадр, передавая шаг одометрии!
+    final_safe_objects = tracker.track_and_filter_ghosts(confirmed_obstacles, train_step_z=train_step_z)
 
-    # 🟢 ГЕОМЕТРИЧЕСКИЙ ВОССТАНОВИТЕЛЬ ТОЧЕК ДЛЯ ФРОНТЕНДА (БЕЗ ХЛАМА В API)
-    # Прямо перед возвратом объектов в API, берем точки из points_inside_gauge
-    # и привязываем их к финальным 3D-боксам трекера
+    # 🟢 ГЕОМЕТРИЧЕСКИЙ ВОССТАНОВИТЕЛЬ ТОЧЕК ДЛЯ ФРОНТЕНДА THREE.JS
     for obj in final_safe_objects:
         cx, cy, cz = obj["center"]
         w, h, d = obj["dimensions"]
         
-        # Вырезаем точки, попавшие внутрь габаритов подтвержденного объекта
-        lux = 0.10 # Небольшой люфт-запас в 10 см
+        lux = 0.10  # Небольшой люфт-запас в 10 см
         in_box_mask = (
             (points_inside_gauge[:, 0] >= (cx - w/2 - lux)) & (points_inside_gauge[:, 0] <= (cx + w/2 + lux)) &
             (points_inside_gauge[:, 1] >= (cy - h/2 - lux)) & (points_inside_gauge[:, 1] <= (cy + h/2 + lux)) &
@@ -458,14 +488,12 @@ def process_point_cloud(file_path, tracker, train_step_z=0.0, is_open_space=Fals
         )
         box_points = points_inside_gauge[in_box_mask]
         
-        # Сжимаем плотность: берем каждую 3-ю точку, чтобы не раздувать WebSocket пакет
+        # Сжимаем плотность в 3 раза, чтобы WebSocket-пакеты летели мгновенно
         downsampled_box_pts = box_points[::3]
-        
-        # Записываем чистые float координаты X, Y, Z в формате списка для JSON
         obj["raw_points"] = downsampled_box_pts[:, :3].astype(float).tolist()
         
-    final_safe_objects = tracker.track_and_filter_ghosts(confirmed_obstacles, train_step_z=train_step_z)
     return final_safe_objects
+
 
 # def process_point_cloud(file_path, tracker_engine):
 #     """Сквозной ИИ-конвейер с сохранением 100% плотности точек внутри зоны контроля."""

@@ -1,0 +1,9 @@
+[INFO] [1790277564.782364799] [rosbag2_storage]: Opened database '/app/for_hackathon/doubleT_obstacle/doubleT_obstacle_0.db3' for READ_ONLY.
+[INFO] [1790277564.782409558] [rosbag2_player]: Set rate to 1
+[INFO] [1790277564.789840632] [rosbag2_player]: Adding keyboard callbacks.
+[INFO] [1790277564.789881730] [rosbag2_player]: Press SPACE for Pause/Resume
+[INFO] [1790277564.789890696] [rosbag2_player]: Press CURSOR_RIGHT for Play Next Message
+[INFO] [1790277564.789898273] [rosbag2_player]: Press CURSOR_UP for Increase Rate 10%
+[INFO] [1790277564.789905450] [rosbag2_player]: Press CURSOR_DOWN for Decrease Rate 10%
+[INFO] [1790277564.790366796] [rosbag2_storage]: Opened database '/app/for_hackathon/doubleT_obstacle/doubleT_obstacle_0.db3' for READ_ONLY.
+[INFO] [1790277585.189230262] [rosbag2_storage]: Opened database '/app/for_hackathon/doubleT_obstacle/doubleT_obstacle_0.db3' for READ_ONLY.

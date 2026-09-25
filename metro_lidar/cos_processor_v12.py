@@ -10,7 +10,7 @@ import numpy as np
 import open3d as o3d
 from sklearn.cluster import DBSCAN
 import time
-import config
+import metro_lidar.config as config
 
 def calculate_adaptive_fusion_shift(shift_rails, shift_walls, prev_velocity_kmh, rail_points_count, idx, dt=0.1):
     """

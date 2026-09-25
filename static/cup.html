@@ -61,47 +61,64 @@
     <div class="subtitle">Автоматизированная система диспетчерского контроля беспилотного состава Мосметро</div>
     <!-- Панель системных констант ИИ-ядра -->
     <!-- Интерактивный пульт управления параметрами ИИ-ядра -->
-    <div class="ai-config-bar" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px 30px; height: auto; padding: 15px 20px;">
-        
+    <!-- Интерактивный пульт управления параметрами ИИ-ядра с графической схемой морды вагона -->
+<!-- Интерактивный пульт управления параметрами ИИ-ядра с графической схемой морды вагона -->
+<div class="ai-config-bar" style="display: grid; grid-template-columns: 240px repeat(3, 1fr); gap: 15px 30px; height: auto; padding: 15px 20px;">
+    
+    <!-- ЧЕРТЕЖ МОРДЫ ВАГОНА И РАМКИ СКАНИРОВАНИЯ -->
+    <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; border-right: 1px dashed #1e293b; padding-right: 15px;">
+        <div style="font-size: 10px; color: #64748b; text-transform: uppercase; margin-bottom: 4px; font-family: monospace;">Срез створа сканера 3D</div>
+        <canvas id="train-front-gauge" width="220" height="120" style="border: 1px solid #1e293b; background: #020617; border-radius: 4px;"></canvas>
+    </div>
+
+    <!-- КОЛОНКА ПОЛЗУНКОВ 1: Точки и Ширина ворот сканера -->
+    <div style="display: flex; flex-direction: column; gap: 12px;">
         <div class="ai-config-item" style="display: flex; flex-direction: column; gap: 5px;">
-            <label>🎯 TARGET POINTS: <span id="val-points" style="color:#38bdf8; font-weight:bold;">...</span></label>
+            <label> TARGET POINTS: <span id="val-points" style="color:#38bdf8; font-weight:bold;">...</span></label>
             <input type="range" id="cfg-points" min="5000" max="100000" step="5000" oninput="sendConfigUpdate()">
         </div>
-        
         <div class="ai-config-item" style="display: flex; flex-direction: column; gap: 5px;">
-            <label>🛡️ SAFE DISTANCE Z: <span id="val-safe-z" style="color:#eab308; font-weight:bold;">...</span></label>
-            <input type="range" id="cfg-safe-z" min="10" max="80" step="5" oninput="sendConfigUpdate()">
-        </div>
-        
-        <div class="ai-config-item" style="display: flex; flex-direction: column; gap: 5px;">
-            <label>📐 DBSCAN EPS: <span id="val-eps" style="color:#22c55e; font-weight:bold;">...</span></label>
-            <input type="range" id="cfg-eps" min="0.1" max="1.0" step="0.05" oninput="sendConfigUpdate()">
-        </div>
-        
-        <div class="ai-config-item" style="display: flex; flex-direction: column; gap: 5px;">
-            <label>👥 MIN SAMPLES: <span id="val-samples" style="color:#22c55e; font-weight:bold;">...</span></label>
-            <input type="range" id="cfg-samples" min="1" max="15" step="1" oninput="sendConfigUpdate()">
-        </div>
-        
-        <div class="ai-config-item" style="display: flex; flex-direction: column; gap: 5px;">
-            <label>🚇 GAUGE WIDTH: <span id="val-width" style="color:#a855f7; font-weight:bold;">...</span></label>
+            <label> GAUGE WIDTH (X): <span id="val-width" style="color:#a855f7; font-weight:bold;">...</span></label>
             <input type="range" id="cfg-width" min="1.5" max="3.5" step="0.1" oninput="sendConfigUpdate()">
         </div>
-        
+    </div>
+
+    <!-- КОЛОНКА ПОЛЗУНКОВ 2: Дальность и Потолок высоты сканера (MAX_Y) -->
+    <div style="display: flex; flex-direction: column; gap: 12px;">
         <div class="ai-config-item" style="display: flex; flex-direction: column; gap: 5px;">
-            <label>📡 MAX VISION RANGE: <span id="val-max-z" style="color:#06b6d4; font-weight:bold;">...</span></label>
-            <input type="range" id="cfg-max-z" min="50" max="250" step="10" oninput="sendConfigUpdate()">
+            <label>️ SAFE DISTANCE Z: <span id="val-safe-z" style="color:#eab308; font-weight:bold;">...</span></label>
+            <input type="range" id="cfg-safe-z" min="10" max="80" step="5" oninput="sendConfigUpdate()">
         </div>
-            <!-- Вставляем тумблер 3D-мешей внутрь блока .ai-config-bar -->
-        <div class="ai-config-item" style="display: flex; flex-direction: column; gap: 5px; justify-content: center;">
-            <label style="display: flex; align-items: center; cursor: pointer; margin-top: 15px;">
-                <input type="checkbox" id="cfg-meshbox" onchange="sendConfigUpdate()" style="width: 18px; height: 18px; margin-right: 10px; cursor: pointer; accent-color: #00f0ff;">
-                <span style="color: #00f0ff; font-weight: bold;">📦 ОТОБРАЖАТЬ 3D MESHBOX</span>
+        <div class="ai-config-item" style="display: flex; flex-direction: column; gap: 5px;">
+            <label> SCANNER MAX Y (Высота): <span id="val-max-y" style="color:#f43f5e; font-weight:bold;">...</span></label>
+            <input type="range" id="cfg-max-y" min="1.5" max="4.5" step="0.1" oninput="sendConfigUpdate()">
+        </div>
+    </div>
+    <div class="ai-config-item" style="display: flex; flex-direction: column; gap: 5px;">
+    <label> MAX VISION RANGE: <span id="val-max-z" style="color:#06b6d4; font-weight:bold;">...</span></label>
+    <input type="range" id="cfg-max-z" min="50" max="250" step="10" oninput="sendConfigUpdate()">
+</div>
+
+    <!-- КОЛОНКА ПОЛЗУНКОВ 3: DBSCAN Пороги и Чекбокс кубов -->
+    <div style="display: flex; flex-direction: column; gap: 12px;">
+        <div class="ai-config-item" style="display: flex; flex-direction: column; gap: 5px;">
+            <label> DBSCAN EPS: <span id="val-eps" style="color:#22c55e; font-weight:bold;">...</span></label>
+            <input type="range" id="cfg-eps" min="0.1" max="1.0" step="0.05" oninput="sendConfigUpdate()">
+        </div>
+        <div class="ai-config-item" style="display: flex; flex-direction: column; gap: 5px;">
+            <label> MIN SAMPLES: <span id="val-samples" style="color:#22c55e; font-weight:bold;">...</span></label>
+            <input type="range" id="cfg-samples" min="1" max="15" step="1" oninput="sendConfigUpdate()">
+        </div>
+        <div class="ai-config-item" style="display: flex; align-items: center; margin-top: 5px;">
+            <label style="display: flex; align-items: center; cursor: pointer;">
+                <input type="checkbox" id="cfg-meshbox" onchange="sendConfigUpdate()" style="width: 16px; height: 18px; margin-right: 10px; cursor: pointer; accent-color: #00ffcc;">
+                <span style="color: #00ffcc; font-weight: bold; font-size: 11px;"> 3D MESHBOX</span>
             </label>
         </div>
-
-        
     </div>
+</div>
+
+
 
 
     <!-- Мониторинг линий -->
@@ -150,56 +167,114 @@
         console.log("[ЦУП ДЕБАГ] Скрипт инициализирован. Начинаем опрос ИИ-сервера...");
 
 // 1. При загрузке страницы стягиваем текущие значения из config.py
+// 1. При загрузке страницы стягиваем текущие значения из config.py
 fetch('/api/config')
-    .then(response => {
-        console.log("[ЦУП ДЕБАГ] Сервер ответил на HTTP-запрос. Статус:", response.status);
-        return response.json();
-    })
-    .then(config => {
-        console.log("[ЦУП ДЕБАГ] УСПЕШНО! Сырой JSON-пакет от FastAPI:", config);
-        
-        // Проверяем наличие DOM-элементов перед записью (защита от Null)
-        console.log("[ЦУП ДЕБАГ] Проверка DOM-элементов ползунков:");
-        console.log("  ↳ cfg-points:", document.getElementById("cfg-points"));
-        console.log("  ↳ cfg-safe-z:", document.getElementById("cfg-safe-z"));
-        console.log("  ↳ cfg-meshbox:", document.getElementById("cfg-meshbox"));
-
-        // Проставляем значения в ползунки
-        document.getElementById("cfg-points").value = config.V2_OBSTACLE_TARGET_POINTS;
-        document.getElementById("cfg-safe-z").value = config.V2_OBSTACLE_SAFE_DISTANCE_Z;
-        document.getElementById("cfg-eps").value = config.DBSCAN_OBSTACLE_EPS;
-        document.getElementById("cfg-samples").value = config.DBSCAN_OBSTACLE_MIN_SAMPLES;
-        document.getElementById("cfg-width").value = (config.TRAIN_HALF_WIDTH * 2);
-        document.getElementById("cfg-max-z").value = config.MAX_Z_VISION;
-        
-        // Выставляем галочку чекбокса
-        document.getElementById("cfg-meshbox").checked = config.V2_OBSTACLE_SHOW_3D_MESHBOX;
-        
-        console.log("[ЦУП ДЕБАГ] Ползунки успешно выставлены в позиции. Запускаем рендер текста...");
-
-        // Зажигаем неоновые циферки на экране вместо троеточий
-        updateTextLabels(
-            config.V2_OBSTACLE_TARGET_POINTS, 
-            config.V2_OBSTACLE_SAFE_DISTANCE_Z, 
-            config.DBSCAN_OBSTACLE_EPS, 
-            config.DBSCAN_OBSTACLE_MIN_SAMPLES, 
-            (config.TRAIN_HALF_WIDTH * 2), 
-            config.MAX_Z_VISION
-        );
-        
-        const newLog = document.createElement("div");
-        newLog.className = "log-row";
-        newLog.style.color = "#a855f7";
-        newLog.innerText = `[СИСТЕМА] Интерактивный ИИ-пульт синхронизирован с ядром. Управление активно.`;
-        logWindow.appendChild(newLog);
-    })
-    .catch(err => {
-        console.error("❌ [ЦУП ДЕБАГ КРИТ] Ошибка в цепочке обработки конфигурации:", err);
+.then(response => {
+    console.log("[ЦУП ДЕБАГ] Сервер ответил на HTTP-запрос. Статус:", response.status);
+    return response.json();
+})
+.then(config => {
+    console.log("[ЦУП ДЕБАГ] УСПЕШНО! Сырой JSON-пакет от FastAPI:", config);
+    // 🕵️‍♂️ ЦУП АУДИТ: Проверяем, все ли элементы присутствуют в вашей HTML-панели
+    const requiredIds = ["cfg-points", "cfg-safe-z", "cfg-eps", "cfg-samples", "cfg-width", "cfg-max-z", "cfg-max-y", "cfg-meshbox"];
+    requiredIds.forEach(id => {
+        if (!document.getElementById(id)) {
+            console.error(`❌ [ЦУП КРИТ-КОСЯК В СТРУКТУРЕ]: В вашем HTML-коде физически отсутствует элемент с id="${id}"!`);
+        }
     });
 
+    
+    // 🟢 ЖЕЛЕЗОБЕТОННЫЙ ФИКС ID: Используем строго префиксы cfg- из вашей верстки
+    document.getElementById("cfg-points").value = config.V2_OBSTACLE_TARGET_POINTS;
+    document.getElementById("cfg-safe-z").value = config.V2_OBSTACLE_SAFE_DISTANCE_Z;
+    document.getElementById("cfg-eps").value = config.DBSCAN_OBSTACLE_EPS;
+    document.getElementById("cfg-samples").value = config.DBSCAN_OBSTACLE_MIN_SAMPLES;
+    document.getElementById("cfg-width").value = (config.TRAIN_HALF_WIDTH * 2).toFixed(1);
+    document.getElementById("cfg-max-z").value = config.MAX_Z_VISION;
+    document.getElementById("cfg-max-y").value = config.MAX_Y_VISION.toFixed(1);
+    
+    document.getElementById("cfg-meshbox").checked = config.V2_OBSTACLE_SHOW_3D_MESHBOX;
+    console.log("[ЦУП ДЕБАГ] Ползунки успешно выставлены в позиции. Запускаем рендер текста...");
+
+    // Зажигаем неоновые циферки на экране вместо троеточий
+    updateTextLabels(
+        config.V2_OBSTACLE_TARGET_POINTS, 
+        config.V2_OBSTACLE_SAFE_DISTANCE_Z, 
+        config.DBSCAN_OBSTACLE_EPS, 
+        config.DBSCAN_OBSTACLE_MIN_SAMPLES, 
+        (config.TRAIN_HALF_WIDTH * 2), 
+        config.MAX_Z_VISION,
+        config.MAX_Y_VISION
+    );
+
+    // Первичная отрисовка чертежа ИИ-сканера на морде вагона
+    if (typeof renderTrainFrontHUD === "function") {
+        renderTrainFrontHUD((config.TRAIN_HALF_WIDTH * 2), config.MAX_Y_VISION);
+    }
+
+    const newLog = document.createElement("div");
+    newLog.className = "log-row";
+    newLog.style.color = "#a855f7";
+    newLog.innerText = `[СИСТЕМА] Интерактивный ИИ-пульт synchronized с ядром. Управление активно.`;
+    logWindow.appendChild(newLog);
+})
+.catch(err => {
+    console.error("❌ [ЦУП ДЕБАГ КРИТ] Ошибка в цепочке обработки конфигурации:", err);
+});
+
+
+    // Контур Canvas для отрисовки морды поезда ОЯР/ЭЯ в реальном времени
+    const frontCanvas = document.getElementById("train-front-gauge");
+    const frontCtx = frontCanvas.getContext("2d");
+
+function renderTrainFrontHUD(totalWidth, maxY) {
+    frontCtx.clearRect(0, 0, frontCanvas.width, frontCanvas.height);
+    
+    const cx = frontCanvas.width / 2;
+    const cy = frontCanvas.height - 15;
+    const scale = 32; // Масштабирование метров в пиксели
+    const halfWidth = totalWidth / 2.0;
+
+    // 1. Отрисовка силуэта вагона метро
+    frontCtx.strokeStyle = "rgba(148, 163, 184, 0.15)";
+    frontCtx.lineWidth = 1.5;
+    frontCtx.strokeRect(cx - 1.35 * scale, cy - 2.8 * scale, 2.7 * scale, 2.8 * scale); // Корпус
+    
+    frontCtx.fillStyle = "rgba(56, 189, 248, 0.02)";
+    frontCtx.fillRect(cx - 1.1 * scale, cy - 2.4 * scale, 2.2 * scale, 1.0 * scale); // Стекло лобовое
+    frontCtx.strokeRect(cx - 1.1 * scale, cy - 2.4 * scale, 2.2 * scale, 1.0 * scale);
+    
+    // Рельсы колеи путей
+    frontCtx.strokeStyle = "#27272a";
+    frontCtx.lineWidth = 3;
+    frontCtx.beginPath();
+    frontCtx.moveTo(cx - 0.76 * scale, cy); frontCtx.lineTo(cx - 0.76 * scale, cy + 8);
+    frontCtx.moveTo(cx + 0.76 * scale, cy); frontCtx.lineTo(cx + 0.76 * scale, cy + 8);
+    frontCtx.stroke();
+
+    // 2. 🚨 ЖИВАЯ ОТРИСОВКА НЕОНОВОГО КОРРИДОРА СКАНИРОВАНИЯ (X и Y ходят вместе!)
+    frontCtx.strokeStyle = "#00ffcc";
+    frontCtx.lineWidth = 2;
+    frontCtx.setLineDash([4, 4]); // Эффект ИИ-сетки лазера
+    
+    const scanWidthPixels = totalWidth * scale;
+    // Ограничиваем высоту над рельсами (от пола MIN_Y = 0.15)
+    const scanHeightPixels = (maxY - 0.15) * scale;
+    
+    frontCtx.strokeRect(cx - (halfWidth * scale), cy - scanHeightPixels, scanWidthPixels, scanHeightPixels);
+    frontCtx.setLineDash([]); // Сброс пунктира
+    
+    // Подпись текущих физических габаритов створа
+    frontCtx.fillStyle = "#00ffcc";
+    frontCtx.font = "9px monospace";
+    frontCtx.textAlign = "center";
+    frontCtx.fillText(`КОНТУР ИИ: ${totalWidth.toFixed(1)}м x ${maxY.toFixed(1)}м`, cx, cy - 6);
+}
+
 // Вспомогательная функция обновления текста над ползунками
-function updateTextLabels(points, safeZ, eps, samples, width, maxZ) {
-    console.log("[ЦУП ДЕБАГ] Вызвана функция updateTextLabels с параметрами:", {points, safeZ, eps, samples, width, maxZ});
+function updateTextLabels(points, safeZ, eps, samples, width, maxZ, maxY) {
+    // 🟢 Принудительно передаем ширину и высоту в Canvas на каждом обновлении экрана
+    renderTrainFrontHUD(parseFloat(width), parseFloat(maxY));
     
     try {
         document.getElementById("val-points").innerText = parseInt(points).toLocaleString();
@@ -208,11 +283,12 @@ function updateTextLabels(points, safeZ, eps, samples, width, maxZ) {
         document.getElementById("val-samples").innerText = parseInt(samples) + " пт.";
         document.getElementById("val-width").innerText = parseFloat(width).toFixed(2) + "м";
         document.getElementById("val-max-z").innerText = parseFloat(maxZ).toFixed(0) + "м";
-        console.log("[ЦУП ДЕБАГ] Текстовые метки успешно обновлены на экране!");
+        document.getElementById("val-max-y").innerText = parseFloat(maxY).toFixed(2) + "м"; // Показываем метры на экране
     } catch (e) {
-        console.error("❌ [ЦУП ДЕБАГ КРИТ] Ошибка обновления innerText в DOM:", e);
+        console.error(e);
     }
 }
+
 
 // 2. Функция отправки новых параметров на бэкенд FastAPI
 let debounceTimer;
@@ -223,9 +299,13 @@ function sendConfigUpdate() {
     const samples = parseInt(document.getElementById("cfg-samples").value);
     const width = parseFloat(document.getElementById("cfg-width").value);
     const maxZ = parseFloat(document.getElementById("cfg-max-z").value);
+    const maxY = parseFloat(document.getElementById("cfg-max-y").value); // 🟢 Считываем живую высоту
     const showMeshbox = document.getElementById("cfg-meshbox").checked;
 
-    updateTextLabels(points, safeZ, eps, samples, width, maxZ);
+    // Мгновенная прорисовка рамок на чертеже при движении мышки диспетчера
+    renderTrainFrontHUD(width, maxY);
+
+    updateTextLabels(points, safeZ, eps, samples, width, maxZ, maxY);
 
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
@@ -236,10 +316,9 @@ function sendConfigUpdate() {
             DBSCAN_OBSTACLE_MIN_SAMPLES: samples,
             TRAIN_HALF_WIDTH: width,
             MAX_Z_VISION: maxZ,
+            MAX_Y_VISION: maxY, // 🟢 ОТПРАВЛЯЕМ КОНСТАНТУ ПО СЕТИ НА БЭК
             V2_OBSTACLE_SHOW_3D_MESHBOX: showMeshbox
         };
-
-        console.log("[ЦУП ДЕБАГ] Отправляем POST на сервер с новым payload:", payload);
 
         fetch('/api/config', {
             method: 'POST',
@@ -247,20 +326,10 @@ function sendConfigUpdate() {
             body: JSON.stringify(payload)
         })
         .then(res => res.json())
-        .then(resData => {
-            console.log("[ЦУП ДЕБАГ] Ответ сервера на POST-запрос:", resData);
-            if (resData.status === "success") {
-                const newLog = document.createElement("div");
-                newLog.className = "log-row";
-                newLog.style.color = showMeshbox ? "#22c55e" : "#eab308";
-                newLog.innerText = `[ЦУП ДИСПЕТЧЕР] Константы ИИ-ядра переопределены. EPS=${eps}, 3D-Boxes=${showMeshbox ? "ВКЛ 📦" : "ВЫКЛ 🌌"}`;
-                logWindow.appendChild(newLog);
-                logWindow.scrollTop = logWindow.scrollHeight;
-            }
-        })
-        .catch(err => console.error("❌ [ЦУП ДЕБАГ КРИТ] Ошибка отправки POST:", err));
+        .catch(err => console.error(err));
     }, 150);
 }
+
 
 
         ws.onmessage = (event) => {

@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<?xml-model href="http://ros.org" schematypens="http://w3.org"?>
+<package format3>
+  <name>metro_detector</name>
+  <version>1.0.0</version>
+  <description>Digital Twin Subway Lidar Detector Node</description>
+  <maintainer email="team@metro.ru">Subway Team</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

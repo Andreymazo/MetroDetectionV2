@@ -226,6 +226,7 @@ scene.add(new THREE.AmbientLight(0x111111));
 const railMaterial = new THREE.MeshStandardMaterial({ color: 0x555555, roughness: 0.5 });
 const tunnelMat = new THREE.MeshStandardMaterial({ color: 0x111111, wireframe: true });
 
+let currentScannerHeightY = 3.3; // Дефолтное значение из вашего config.py
 let activeObstacles = [];
 let currentTrackComponents = [];
 
@@ -302,6 +303,9 @@ if (data.objects) {
     const obsSpeedSpan = document.getElementById("hud-obs-speed");
 
     if (data.distance_to_obstacle_m !== undefined && data.distance_to_obstacle_m > 0) {
+        // 🕵️‍♂️ ПРИНТ ДИСТАНЦИИ В КОНСОЛЬ БРАУЗЕРА (F12)
+        console.log(`📡 [ФРОНТ HUD ПОЛУЧЕНО]: distance_to_obstacle_m из корня JSON пакета: ${data.distance_to_obstacle_m.toFixed(3)} м`);
+
         obsBox.style.color = "#ff3333";
         obsBox.style.textShadow = "0 0 10px #ff3333";
         obsSpeedSpan.innerHTML = `${data.distance_to_obstacle_m.toFixed(1)}<span class="hud-unit" style="color: #ff3333;">м</span>`;
@@ -333,7 +337,9 @@ if (data.objects) {
     scene.add(leftRailMesh); scene.add(rightRailMesh);
     currentTrackComponents.push(leftRailMesh, rightRailMesh);
     
-    const tunnelPath = createStraightPath(0.0, 2.0);
+    // Было: const tunnelPath = createStraightPath(0.0, 2.0);
+    // Стало: привязываем высоту свода тоннеля к живой переменной ползунка ЦУП
+    const tunnelPath = createStraightPath(0.0, currentScannerHeightY);
     const tunnelGeometry = new THREE.TubeGeometry(tunnelPath, 32, 4.0, 16, false);
     const tunnelMesh = new THREE.Mesh(tunnelGeometry, tunnelMat);
     scene.add(tunnelMesh);
@@ -391,7 +397,8 @@ if (data.objects) {
         const className = "OBSTACLE";
         const posText = obj.position_text !== undefined ? obj.position_text : "Препятствие";
         const shapeText = obj.shape_text !== undefined ? obj.shape_text : "Объект";
-
+        // 🕵️‍♂️ ПРИНТ ГЕОМЕТРИИ КУБА В КОНСОЛЬ БРАУЗЕРА (F12)
+        console.log(`📦 [ФРОНТ ГЕОМЕТРИЯ КУБА ID:${obj.id}]: center_z (cz) = ${cz.toFixed(3)} м | Math.abs(cz) = ${distance.toFixed(3)} м`);
         // 🟢 ДОБАВЛЯЕМ ДОПОЛНИТЕЛЬНЫЙ ЛОГ О ФОРМЕ ПРЯМО В КОНСОЛЬ БРАУЗЕРА (F12)
         // [ИИ-АНАЛИТИКА ЦЕЛЬ ID:\${objId}] Форма из JSON: "shapeText" | Позиция: "{posText}"
         console.log(` [ИИ-АНАЛИТИКА ЦЕЛЬ ID:${objId}] Форма из JSON: "${shapeText}" | Позиция: "${posText}"`);

@@ -1,0 +1,16 @@
+# 1. Жестко блокируем только тяжелые бинарные rosbag-папки и логи
+for_hackathon/
+test_lidar_frames/
+*.bag
+*.bin
+*.pcd
+*.csv
+.git/
+.idea/
+__pycache__/
+*.pyc
+
+# 2. Разрешаем собирать все исходные папки с кодом
+!Dockerfile
+!fastdds_shm.xml
+!metro_lidar/

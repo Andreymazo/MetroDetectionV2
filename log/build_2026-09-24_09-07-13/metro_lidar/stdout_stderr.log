@@ -1,0 +1,24 @@
+running develop
+running egg_info
+creating metro_lidar.egg-info
+writing metro_lidar.egg-info/PKG-INFO
+writing dependency_links to metro_lidar.egg-info/dependency_links.txt
+writing entry points to metro_lidar.egg-info/entry_points.txt
+writing requirements to metro_lidar.egg-info/requires.txt
+writing top-level names to metro_lidar.egg-info/top_level.txt
+writing manifest file 'metro_lidar.egg-info/SOURCES.txt'
+reading manifest file 'metro_lidar.egg-info/SOURCES.txt'
+writing manifest file 'metro_lidar.egg-info/SOURCES.txt'
+running build_ext
+Creating /app/install/metro_lidar/lib/python3.10/site-packages/metro-lidar.egg-link (link to .)
+Installing subway_vision_node script to /app/install/metro_lidar/lib/metro_lidar
+
+Installed /app/build/metro_lidar
+running symlink_data
+creating /app/install/metro_lidar/share
+creating /app/install/metro_lidar/share/ament_index
+creating /app/install/metro_lidar/share/ament_index/resource_index
+creating /app/install/metro_lidar/share/ament_index/resource_index/packages
+symbolically linking /app/build/metro_lidar/resource/metro_lidar -> /app/install/metro_lidar/share/ament_index/resource_index/packages
+creating /app/install/metro_lidar/share/metro_lidar
+symbolically linking /app/build/metro_lidar/package.xml -> /app/install/metro_lidar/share/metro_lidar

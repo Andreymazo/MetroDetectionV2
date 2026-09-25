@@ -1,28 +1,22 @@
 import os
 import gc
-import json
 import asyncio
-import threading
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# Импортируем тяжелые ИИ и ЦОС движки из ядра решения
+
+# Импортируем движок одометрии стен тоннеля
+# from cos_processor_v11 import StableLidarOdometryV10
 from metro_lidar.cos_processor_v12 import StableLidarOdometryV12
 import metro_lidar.cos_processor_v12 as cos_processor_v12
+# Импортируем изолированный пайплайн поиска препятствий
+# from generate_submission import process_point_cloud
 from metro_lidar.generate_submission_v2 import process_point_cloud
 from metro_lidar.tracker_v2 import LidarObstacleTrackerV2
 import metro_lidar.config as config
-
-# 🟢 НАТИВНЫЕ РОБОТОТЕХНИЧЕСКИЕ ИМПОРТЫ ДЛЯ СВЯЗИ С НОДОЙ
-try:
-    import rclpy
-    from std_msgs.msg import String as RosString
-    ROS2_AVAILABLE = True
-except ImportError:
-    ROS2_AVAILABLE = False
 
 app = FastAPI(title="Autonomous Subway Lidar API & Telemetry Core", version="8.0.0")
 
@@ -36,51 +30,6 @@ app.add_middleware(
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# =====================================================================
-# 📦 ГЛОБАЛЬНЫЙ КАРМАН ПАМЯТИ ЦИФРОВОГО ДВОЙНИКА (ДЛЯ ЖИВОГО ROS 2 ПОТОКА)
-# =====================================================================
-latest_ros_telemetry = {
-    "danger_alert": False,
-    "train_speed_kmh": 0.0,
-    "total_distance_m": 0.0,
-    "distance_to_obstacle_m": -1.0,
-    "show_mesh_boxes": True,
-    "objects": [
-        {"id": "RETAINER", "class_id": -1, "confidence": 1.0, "center": [0.0, -20.0, 0.0], "size_3d": [0.01, 0.01, 0.01], "obstacle_speed_kmh": 0.0}
-    ]
-}
-
-def ros2_callback(msg):
-    """Callback фонового шпиона: перехватывает JSON-телеметрию из ROS 2 топика"""
-    global latest_ros_telemetry
-    try:
-        latest_ros_telemetry = json.loads(msg.data)
-    except Exception as e:
-        print(f"[FastAPI ROS Мост ❌ Ошибка десериализации]: {e}", flush=True)
-
-def start_ros2_bg_node():
-    """Инициализация изолированной ноды-шпиона внутри асинхронного FastAPI контура"""
-    if not ROS2_AVAILABLE:
-        print("[FastAPI ROS Мост ⚠️]: rclpy не найден. Нативный ROS 2 контур отключен.", flush=True)
-        return
-    try:
-        if not rclpy.ok():
-            rclpy.init()
-        node = rclpy.create_node('fastapi_telemetry_bridge')
-        # Слушаем тот самый топик телеметрии, куда выстреливает наша боевая нода
-        node.create_subscription(RosString, '/safetrain/telemetry', ros2_callback, 10)
-        print("[FastAPI ROS Мост 📡]: Успешно подписался на нативный топик /safetrain/telemetry", flush=True)
-        rclpy.spin(node)
-    except Exception as e:
-        print(f"[FastAPI ROS Мост ❌ Сбой фонового потока]: {e}", flush=True)
-
-@app.on_event("startup")
-async def startup_event():
-    """Событие старта веб-сервера: запускает нативного шпиона в независимом потоке Linux"""
-    if ROS2_AVAILABLE:
-        bg_thread = threading.Thread(target=start_ros2_bg_node, daemon=True)
-        bg_thread.start()
-        print("[FastAPI 🚀]: Автономный фоновый Linux-поток ROS 2 успешно запущен.", flush=True)
 
 # =====================================================================
 # 🎛️ ИНТЕГРАЦИЯ ИНТЕРАКТИВНОГО ЦУП (Pydantic-схема и эндпоинты)
@@ -93,10 +42,11 @@ class ConfigUpdate(BaseModel):
     TRAIN_HALF_WIDTH: float
     MAX_Z_VISION: float
     MAX_Y_VISION: float 
-    V2_OBSTACLE_SHOW_3D_MESHBOX: bool
+    V2_OBSTACLE_SHOW_3D_MESHBOX: bool  # Новый флаг визуализации
 
 @app.get("/api/config")
 def get_ai_config():
+    """Эндпоинт для проброса глобальных ИИ-констант и лимитов в интерфейс ЦУП"""
     return {
         "V2_OBSTACLE_TARGET_POINTS": getattr(config, "V2_OBSTACLE_TARGET_POINTS", 40000),
         "V2_OBSTACLE_SAFE_DISTANCE_Z": getattr(config, "V2_OBSTACLE_SAFE_DISTANCE_Z", 40.0),
@@ -111,6 +61,7 @@ def get_ai_config():
 
 @app.post("/api/config")
 def update_ai_config(new_cfg: ConfigUpdate):
+    """Эндпоинт динамического изменения параметров config.py на лету из ЦУП"""
     try:
         config.V2_OBSTACLE_TARGET_POINTS = new_cfg.V2_OBSTACLE_TARGET_POINTS
         config.V2_OBSTACLE_SAFE_DISTANCE_Z = new_cfg.V2_OBSTACLE_SAFE_DISTANCE_Z
@@ -119,26 +70,20 @@ def update_ai_config(new_cfg: ConfigUpdate):
         config.TRAIN_HALF_WIDTH = round(new_cfg.TRAIN_HALF_WIDTH / 2.0, 2)
         config.MAX_Z = new_cfg.MAX_Z_VISION
         config.MAX_Y = new_cfg.MAX_Y_VISION
-        config.V2_OBSTACLE_SHOW_3D_MESHBOX = new_cfg.V2_OBSTACLE_SHOW_3D_MESHBOX
+        config.V2_OBSTACLE_SHOW_3D_MESHBOX = new_cfg.V2_OBSTACLE_SHOW_3D_MESHBOX  # Перезаписываем флаг
         return {"status": "success", "message": "Параметры ИИ-ядра успешно применены"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
-
 # =====================================================================
-# 🚀 НОВЫЙ ЭНДПОИНТ ЧИСТОЙ PULL-МОДЕЛИ ДЛЯ ЖИВОГО ROS 2 КОНТУРА
-# =====================================================================
-@app.get("/api/telemetry")
-async def get_live_ros_telemetry():
-    """Прецизионный Pull-эндпоинт: мгновенно отдает фронтенду кадр из ROS-буфера без перегрузок"""
-    global latest_ros_telemetry
-    return latest_ros_telemetry
 
-# Жестко фиксируем путь к вашему датасету
+# Жёстко фиксируем путь к вашему датасету
+# TEST_DATA_DIR = "./test_lidar_frames/roundT_doubleT"
 TEST_DATA_DIR = "./test_lidar_frames/doubleT_obstacle"
 # TEST_DATA_DIR = "./test_lidar_frames/roundT_doubleT"
 # TEST_DATA_DIR = "./test_lidar_frames/roundT_squareT_pressureGate_squareT"
 # TEST_DATA_DIR = "./test_lidar_frames/squareT_platform_squareT_switch"
 # TEST_DATA_DIR = "./test_lidar_frames/doubleT_platform"
+
 
 @app.websocket("/ws/monitoring")
 async def websocket_endpoint(websocket: WebSocket):
@@ -150,6 +95,7 @@ async def websocket_endpoint(websocket: WebSocket):
         "total_distance_meters": 0.0
     }
     
+    # Изолируем экземпляры движков внутри сессии для предотвращения OOM и конфликтов вкладок
     odometry_engine = StableLidarOdometryV12()
     obstacle_tracker_engine = LidarObstacleTrackerV2()
     
@@ -167,6 +113,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     "train_speed_kmh": 0.0,
                     "total_distance_m": round(session_journal["total_distance_meters"], 2),
                     "distance_to_obstacle_m": -1.0,
+                    # 🟢 ПРОБРАСЫВАЕМ УПРАВЛЕНИЕ КОРОБКАМИ НА ФРОНТЕНД ИЗ CONFIG.PY
                     "show_mesh_boxes": config.V2_OBSTACLE_SHOW_3D_MESHBOX,
                     "objects": []
                 }
@@ -174,6 +121,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 if len(frame_files) > 0:
                     idx = session_journal["current_frame_index"]
                     if idx >= len(frame_files):
+                        # Мягкий перезапуск круга симуляции при окончании кадров датасета
                         idx = 0
                         session_journal["current_frame_index"] = 0
                         session_journal["total_distance_meters"] = 0.0
@@ -183,6 +131,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     target_file = frame_files[idx]
                     file_path = os.path.join(TEST_DATA_DIR, target_file)
                     
+                    # -----------------------------------------------------------------
+                    # ВЕТКА А: ИЗОЛИРОВАННАЯ ДЕТЕКЦИЯ ПРЕПЯТСТВИЙ (v2)
+                    # -----------------------------------------------------------------
+                    # -----------------------------------------------------------------
+                    # ВЕТКА А: ДЕТЕКЦИЯ ПРЕПЯТСТВИЙ С УЧЕТОМ ГЕОМЕТРИИ ТУННЕЛЯ
+                    # -----------------------------------------------------------------
                     valid_walls_anchors = [
                         obj for obj in odometry_engine.anchor_map 
                         if obj.get("status") == "STATUS_VALID_ANCHOR" and obj.get("is_wall", False) is True
@@ -195,30 +149,47 @@ async def websocket_endpoint(websocket: WebSocket):
                             max_wall_x = max(wall_x_coords)
                             min_wall_x = min(wall_x_coords)
                             
+                            # Чистый вызов через константу: проверяем разлет стен туннеля
                             if max_wall_x > config.V2_OBSTACLE_WALL_OPEN_THRESHOLD or min_wall_x < -config.V2_OBSTACLE_WALL_OPEN_THRESHOLD:
                                 is_open_space = True
                                 
                     if is_open_space:
                         print(f" 🛬 [ГЕО-ШЛЮЗ]: Зафиксировано расширение туннеля (Разлет стен: {min_wall_x:.1f}м ... {max_wall_x:.1f}м). Смена режима следования колеи.", flush=True)
-                    
+                    # 🟢 ИИ-ФИКС СКОРОСТИ: Задаем начальное безопасное приближение перед расчетами.
+                    # Это защищает код от UnboundLocalError, если одометрия пропустит такт.
                     shift_z_physical = 0.0
+
+                    # Блок расчета одометрии (если есть)
+                    if hasattr(odometry_engine, 'calculate_shift'):
+                        # Здесь ваша одометрия считает живой сдвиг и перезаписывает ноль:
+                        # shift_z_physical = odometry_engine.calculate_shift(...)
+                        pass
                     detected_obstacles = process_point_cloud(file_path, obstacle_tracker_engine, train_step_z=shift_z_physical, is_open_space=is_open_space)
 
+                    
+                    # -----------------------------------------------------------------
+                    # ВЕТКА Б: ЧЕСТНАЯ ОДОМЕТРИЯ СТЕН И РЕЛЬСОВ (ВЫЗОВ ИЗ ЯДРА v12)
+                    # -----------------------------------------------------------------
+                    # Читаем бинарный файл один раз за такт сокета
                     raw_points = np.fromfile(file_path, dtype=np.float32).reshape(-1, config.MATRIX_WIDTH_CHANNELS)
 
+                    # 1. Запускаем параллельный контур рельсового одометра (ОЯР)
                     shift_z_rails, rail_passport = odometry_engine.compute_raw_rail_odo_shift(raw_points, dt)
 
+                    # Вывод оригинального лога диагностики ОЯР путей
                     if rail_passport is not None:
                         print(f"   [API ВЫХОД ОЯР] Такт кадра #{idx:03d} | rail_passport: dict (Есть: True)", flush=True)
                         rx, ry, rz = rail_passport["centroid"]
                         print(f"      ↳ Паспорт ОЯР -> ID: {rail_passport['id']}, Центр: [{rx}, {ry}, {rz}], Статус: {rail_passport['status']}", flush=True)
 
+                    # 2. Запускаем контур стен туннеля (ЭЯ)
                     macro_cloud = odometry_engine.extract_clean_macro_tunnel(file_path)
                     
                     if macro_cloud is not None:
                         passports = odometry_engine.build_passports_via_dbscan(macro_cloud)
                         calculate_speed_trigger = bool(idx > 0)
                         
+                        # Сопоставляем стены (якоря напечатаются в консоль внутри метода)
                         shift_z_walls, matches_count, logs = odometry_engine.associate_and_calculate_shift(
                             passports, dt, calculate_speed=calculate_speed_trigger
                         )
@@ -234,6 +205,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     current_rail_points_count = int(np.sum(rail_points_mask))
 
                     # Передаем ровно 6 параметров в соответствии с вашим новым ядром v12
+                    # Функция сама отключит капризные фильтры на старте и отсечет прыжки скорости!
                     shift_z_physical = cos_processor_v12.calculate_adaptive_fusion_shift(
                         shift_z_rails, 
                         shift_z_walls, 
@@ -258,6 +230,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Упаковываем чистую телеметрию одометрии в корень JSON-пакета
                     frame_data["train_speed_kmh"] = round(float(calculated_speed_kmh), 1)
                     frame_data["total_distance_m"] = round(float(session_journal["total_distance_meters"]), 1)
+
                     # -----------------------------------------------------------------
                     # УПАКОВКА ОБЪЕКТОВ СИНХРОННО ПОД ТРЕБОВАНИЯ THREE.JS
                     # -----------------------------------------------------------------
@@ -277,17 +250,20 @@ async def websocket_endpoint(websocket: WebSocket):
                             three_z = -abs(float(cz))
                             
                             # === ЖЕЛЕЗОБЕТОННЫЙ МАТЕМАТИЧЕСКИЙ КЛАССИФИКАТОР МОРФОЛОГИИ ===
+                            # Если высота существенно больше ширины и глубины — это человек/столб
                             if h > w and h > d and h > 1.0:
                                 shape_text = "Человек / Вертикальная конструкция"
                                 shape_type = "VERTICAL_SILHOUETTE"
+                            # Если объект очень плоский по высоте — это настил/препятствие на рельсах
                             elif h < 0.40 and (w > 0.6 or d > 0.6):
                                 shape_text = "Плоский предмет / Настил"
                                 shape_type = "FLAT_OBSTACLE"
+                            # Во всех остальных случаях — объемный блок или коробка
                             else:
                                 shape_text = "Объемная коробка / Блок"
                                 shape_type = "BOX_BLOCK"
 
-                            # Пересчитываем позицию и зоны риска по three_x
+                            # Пересчитываем позицию и зоны риска по прецизионной медиане three_x
                             deviation_x = abs(three_x)
                             if deviation_x <= 0.35:
                                 position_status = "CENTER"
@@ -298,13 +274,15 @@ async def websocket_endpoint(websocket: WebSocket):
                             else:
                                 position_status = "RIGHT_EDGE"
                                 position_text = "Касается правой кромки габарита ⚠️"
+                            # =============================================================
 
-                            # Извлекаем массив прореженных сырых точек кластера
+                            # Извлекаем массив прореженных сырых точек кластера из DBSCAN
                             raw_pts = obj.get("raw_points", [])
                             three_pts = []
                             for pt in raw_pts:
+                                # Перетасовываем оси точек препятствия под Three.js (Z уводим в минус)
                                 three_pts.append([float(pt[0]), float(pt[1]), -abs(float(pt[2]))])
-
+                                # 🕵️‍♂️ ЦЕЛЕВОЙ КОНКУРСНЫЙ ПРИНТ ДАННЫХ ПЕРЕДОТПРАВКИ НА ФРОНТ
                             print(f" [БЭК ➔ JSON СТАТУС ID:{obj.get('id', obj_idx)}]:\n"
                                 f"      ↳ Локальный cz из ИИ-ядра: {cz:+.3f} м\n"
                                 f"      ↳ three_z для Three.js:     {three_z:+.3f} м\n"
@@ -318,12 +296,16 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "center": [three_x, three_y, three_z],
                                 "size_3d": [float(w), float(h), float(d)],
                                 "obstacle_speed_kmh": float(obj.get("obstacle_speed", 0.0)),
+                                # Пробрасываем честные живые данные на фронтенд
                                 "position_status": position_status,
                                 "position_text": position_text,
                                 "shape_type": shape_type,
                                 "shape_text": shape_text,
+                                # Наше живое облегченное лазерное облако препятствия
                                 "obstacle_points": three_pts 
                             })
+
+
                     else:
                         frame_data["distance_to_obstacle_m"] = -1.0
 
@@ -337,10 +319,12 @@ async def websocket_endpoint(websocket: WebSocket):
                         try:
                             pts = wall_obj["raw_points"]
                             if len(pts) > 100:
-                                pts = pts[::3]
+                                pts = pts[::3]  # Прореживаем шагом для разгрузки WebGL рендеринга
                             
                             three_pts = []
                             for pt in pts:
+                                # Внутренний ИИ контракт: pt[0]=X_ширина, pt[1]=Y_высота, pt[2]=Z_дальность
+                                # Уводим продольную ось в минус для Three.js канона
                                 three_pts.append([float(pt[0]), float(pt[1]), -abs(float(pt[2]))])
                             
                             frame_data["objects"].append({
@@ -354,7 +338,6 @@ async def websocket_endpoint(websocket: WebSocket):
                             })
                         except Exception as e:
                             continue
-
                     # 3. Пакуем активный РЕЛЬСОВЫЙ ЯКОРЬ ОЯР под кабину (class_id = 2)
                     if rail_passport is not None:
                         rx, ry, rz = rail_passport["centroid"]
@@ -364,12 +347,12 @@ async def websocket_endpoint(websocket: WebSocket):
                             "class_id": 2,
                             "confidence": 1.0,
                             "center": [float(rx), float(ry), -abs(float(rz))],
-                            "size_3d": [0.6, 0.1, 1.2],
+                            "size_3d": [0.6, 0.1, 1.2],  # Габарит подсветки шпалы
                             "obstacle_speed_kmh": 0.0,
                             "ttl": int(rail_passport.get("ttl", 60))
                         })
 
-                    # Защитный сокетный щит для удержания фронтенд-петли
+                    # Защитный сокетный щит для удержания фронтенд-петли, если сцена пуста
                     if len(frame_data["objects"]) == 0:
                         frame_data["objects"].append({
                             "id": "RETAINER", 
@@ -379,12 +362,17 @@ async def websocket_endpoint(websocket: WebSocket):
                             "size_3d": [0.01, 0.01, 0.01],
                             "obstacle_speed_kmh": 0.0
                         })
-
-                    # СИНХРОНИЗИРОВАННЫЙ ИИ-ЛОГ ТАКТА
+                    # ТВОЙ ОРИГИНАЛЬНЫЙ КОНЦЕВОЙ ПРИНТ СТАТИСТИКИ ТАКТА
+                    # =====================================================================
+                    # 📊 СИНХРОНИЗИРОВАННЫЙ ИИ-ЛОГ ТАКТА (БЕРЕМ ДАННЫЕ НАПРЯМУЮ ИЗ ШЛЮЗА API)
+                    # =====================================================================
                     ttl_val = rail_passport['ttl'] if rail_passport else "Поиск"
+                    
+                    # Извлекаем из готового JSON-пакета только объекты препятствий (class_id == 1)
                     api_obstacles = [obj for obj in frame_data["objects"] if obj.get("class_id") == 1]
                     
                     if len(api_obstacles) > 0:
+                        # Берем первое препятствие такта
                         closest_api_obs = api_obstacles[0]
                         obs_status_str = f"🚨 {len(api_obstacles)} ПРЕДМЕТА ({closest_api_obs.get('position_text')}, {closest_api_obs.get('shape_text')})"
                     else:
@@ -395,15 +383,21 @@ async def websocket_endpoint(websocket: WebSocket):
                           f"V поезда: {calculated_speed_kmh:.1f} км/ч | "
                           f"Путь: {session_journal['total_distance_meters']:.1f} м | "
                           f"Преграды: {obs_status_str}", flush=True)
+                    # =====================================================================
 
+                    # Инкрементируем индекс текущей сессии для следующего кадра
                     session_journal["current_frame_index"] = idx + 1
+                    
+                    # Отправляем сформированную 3D-сцену и телеметрию на фронтенд Three.js
                     await websocket.send_json(frame_data)
                     
+                    # Глубокая очистка памяти от тяжелых локальных массивов текущего такта
                     del macro_cloud, passports, detected_obstacles, valid_walls_anchors
                     gc.collect()
                 else:
                     await websocket.send_json(frame_data)
                     await asyncio.sleep(0.1)
+
 
     except WebSocketDisconnect:
         print("[WS] 3D Cockpit отключился.", flush=True)
@@ -415,3 +409,4 @@ async def websocket_endpoint(websocket: WebSocket):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+
