@@ -4,6 +4,7 @@ import json
 import asyncio
 import threading
 import numpy as np
+import socket 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -414,4 +415,24 @@ async def websocket_endpoint(websocket: WebSocket):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    
+    # 🟢 ШАГ 1: Создаем конфигурацию для основного порта 8000 (3D-Кокпит и API)
+    config_8000 = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="info")
+    server_8000 = uvicorn.Server(config_8000)
+    
+    # 🟢 ШАГ 2: Создаем конфигурацию для дополнительного порта 9090
+    config_9090 = uvicorn.Config(app, host="0.0.0.0", port=9090, log_level="info")
+    server_9090 = uvicorn.Server(config_9090)
+    
+    # 🟢 ШАГ 3: Запускаем оба сервера параллельно в едином асинхронном цикле FastAPI
+    loop = asyncio.get_event_loop()
+    
+    print("[FastAPI 🚀 MULTI-PORT]: Включаю проброс моста на ПОРТ 8000 и ПОРТ 9090 параллельно!", flush=True)
+    loop.run_until_complete(asyncio.gather(
+        server_8000.serve(),
+        server_9090.serve()
+    ))
+
+# if __name__ == "__main__":
+#     import uvicorn
+#     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
