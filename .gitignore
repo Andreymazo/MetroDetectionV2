@@ -13,6 +13,9 @@ subway_pilot/
 *.jpeg
 *.png
 *.csv
+*.odp
+*.pdf
+*.rtf
 datasets/
 test_subway_video.mp4
 submission.csv
@@ -30,6 +33,7 @@ static/index_bck.html
 for_hackathon.zst
 for_hackathon/
 test_lidar_frames_bck/
+cloud_with_fake_obj/
 
 .vscode/
 __pycache__/

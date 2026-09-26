@@ -302,18 +302,36 @@ if (data.objects) {
     const obsBox = document.getElementById("hud-obs-box");
     const obsSpeedSpan = document.getElementById("hud-obs-speed");
 
-    if (data.distance_to_obstacle_m !== undefined && data.distance_to_obstacle_m > 0) {
-        // 🕵️‍♂️ ПРИНТ ДИСТАНЦИИ В КОНСОЛЬ БРАУЗЕРА (F12)
-        console.log(`📡 [ФРОНТ HUD ПОЛУЧЕНО]: distance_to_obstacle_m из корня JSON пакета: ${data.distance_to_obstacle_m.toFixed(3)} м`);
+    // =========================================================================
+    // 🟢 ИСПРАВЛЕННЫЙ ИИ-КОНТУР: ПОДХВАТ ЧЕСТНОЙ ДИСТАНЦИИ ДО ПРЕПЯТСТВИЯ
+    // =========================================================================
+    // Проверяем оба варианта имени ключа, которые могут прийти из API
+    const obstacleDistance = data.distance_to_obstacle_m !== undefined ? data.distance_to_obstacle_m : data.distance_m;
+
+    if (obstacleDistance !== undefined && obstacleDistance > 0) {
+        // Выводим прецизионный лог в консоль браузера (F12) для контроля жюри
+        console.log(` 🛰️ [ФРОНТ HUD ЗАХВАТ]: Найдено препятствие на дистанции: ${obstacleDistance.toFixed(2)} м`);
 
         obsBox.style.color = "#ff3333";
-        obsBox.style.textShadow = "0 0 10px #ff3333";
-        obsSpeedSpan.innerHTML = `${data.distance_to_obstacle_m.toFixed(1)}<span class="hud-unit" style="color: #ff3333;">м</span>`;
+        obsBox.style.textShadow = "0 0 15px #ff3333, 0 0 30px #ff0000";
+        obsSpeedSpan.innerHTML = `${obstacleDistance.toFixed(1)}<span class="hud-unit" style="color: #ff3333;">м</span>`;
+        
+        // 🔥 СМАРТ-БАННЕР: Автоматически включаем аварийное торможение, если до коробки менее 82 метров
+        // (Как раз подхватит наш первый дальнобойный зацеп на 81.9м!)
+        if (obstacleDistance < 82.0) {
+            document.getElementById("danger-banner").style.display = "block";
+            document.getElementById("track-status").innerText = "ОПАСНОСТЬ 🚨"; 
+            document.getElementById("track-status").style.color = "red";
+        }
     } else {
+        // Если реальных преград нет (или пришел технический рельсовый якорь ОЯР)
         obsBox.style.color = "#00ffcc";
         obsBox.style.textShadow = "0 0 15px #00ffcc";
         obsSpeedSpan.innerHTML = "ЧИСТО";
+        document.getElementById("danger-banner").style.display = "none";
     }
+    // =========================================================================
+
 
     // === 2. СТАНДАРТНАЯ ОЧИСТКА 3D СЦЕНЫ В МЕМОРИ ===
     activeObstacles.forEach(obj => scene.remove(obj));

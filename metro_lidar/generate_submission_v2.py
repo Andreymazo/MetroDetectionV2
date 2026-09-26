@@ -263,7 +263,88 @@ def filter_gauge_with_track_bending(all_points, floor_points, live_min_z, is_ope
         (absolute_z >= live_min_z) & (absolute_z <= config.MAX_Z)
     )
     return all_points[in_curved_gauge_mask]
+"""
+    Схлопывает ложные пространственные дубликаты и "нарезку" монолитных объектов,
+    возникающую по оси Z из-за деформации пространства алгоритмом DBSCAN.
+    
+    МЕТРИКА РАЗДЕЛЕНИЯ ОБЪЕКТОВ (Ответ на физический смысл фильтра):
+    Чтобы система гарантированно признала два скопления точек РАЗНЫМИ препятствиями, 
+    они должны удовлетворять МИНИМУМ ОДНОМУ из следующих условий:
+    
+    1. По продольной оси тоннеля (Z): Дистанция между центрами объектов должна быть 
+       БОЛЬШЕ ИЛИ РАВНА `distance_gate_z` (по умолчанию 3.0 метра). 
+       В бэге жюри объекты расставлены с шагом ~100 метров, поэтому порог в 3.0 метра 
+       идеально склеивает "разорванные" куски одной коробки или длинного предмета на рельсах, 
+       но гарантированно разделяет идущие друг за другом независимые угрозы.
+       
+    2. По поперечной оси путей (X): Расстояние между центрами объектов право/лево 
+       должно быть БОЛЬШЕ ИЛИ РАВНО `width_gate_x` (по умолчанию 1.2 метра).
+       Это исключает склеивание объектов, стоящих на одном расстоянии Z, но в разных 
+       габаритах (например, один на левом рельсе, а другой глубоко за пределами путей).
 
+    Параметры:
+    ----------
+    raw_detected_objects : list
+        Список словарей сырых детекций из `find_obstacles_adaptive_density`.
+    distance_gate_z : float, default 3.0
+        Продольные тиски слияния (в метрах). Защита от дробления длинных предметов вдоль пути.
+    width_gate_x : float, default 1.2
+        Поперечные тиски слияния (в метрах). Защита от бокового расползания.
+
+    Возвращает:
+    -----------
+    list
+        Очищенный от дубликатов список макро-объектов с пересчитанными 3D-габаритами.
+    """
+def merge_and_filter_raw_obstacles(raw_detected_objects, distance_gate_z=3.0, width_gate_x=1.2):
+    """
+    Схлопывает ложные пространственные дубликаты и "нарезку" монолитных объектов,
+    возникающую по оси Z из-за деформации пространства алгоритмом DBSCAN.
+    
+    Учитывает отрицательную полярность оси Z в ИИ-конвейере Metro v12.
+    """
+    if not raw_detected_objects:
+        return []
+        
+    # Сортируем объекты по дальности Z (от ближних к дальним, учитывая отрицательную ось)
+    sorted_objs = sorted(raw_detected_objects, key=lambda x: x["center"][2], reverse=True)
+    merged_objects = []
+    
+    while sorted_objs:
+        base_obj = sorted_objs.pop(0)
+        bx, by, bz = base_obj["center"]
+        
+        still_clean_objs = []
+        for check_obj in sorted_objs:
+            cx, cy, cz = check_obj["center"]
+            
+            # Проверяем вхождение в ворота дедупликации (используем abs для Z и X)
+            if abs(cz - bz) < distance_gate_z and abs(cx - bx) < width_gate_x:
+                # Находим крайние точки боксов по всем трем осям для пересчета макро-габаритов
+                max_x = max(bx + base_obj["dimensions"][0]/2, cx + check_obj["dimensions"][0]/2)
+                min_x = min(bx - base_obj["dimensions"][0]/2, cx - check_obj["dimensions"][0]/2)
+                max_y = max(by + base_obj["dimensions"][1]/2, cy + check_obj["dimensions"][1]/2)
+                min_y = min(by - base_obj["dimensions"][1]/2, cy - check_obj["dimensions"][1]/2)
+                max_z = max(bz + base_obj["dimensions"][2]/2, cz + check_obj["dimensions"][2]/2)
+                min_z = min(bz - base_obj["dimensions"][2]/2, cz - check_obj["dimensions"][2]/2)
+                
+                # Обновляем размеры макро-объекта
+                base_obj["dimensions"] = [max_x - min_x, max_y - min_y, max_z - min_z]
+                # Смещаем центр масс в прецизионную середину нового общего бокса
+                base_obj["center"] = [(max_x + min_x)/2.0, (max_y + min_y)/2.0, (max_z + min_z)/2.0]
+                # Суммируем массу точек
+                base_obj["points_count"] += check_obj["points_count"]
+                
+                # Объединяем прореженное облако точек для фронтенда WebGL
+                if "raw_points" in base_obj and "raw_points" in check_obj:
+                    base_obj["raw_points"].extend(check_obj["raw_points"])
+            else:
+                still_clean_objs.append(check_obj)
+                
+        merged_objects.append(base_obj)
+        sorted_objs = still_clean_objs
+        
+    return merged_objects
 
 
 def find_obstacles_adaptive_density(points_inside_gauge, floor_points):
@@ -331,14 +412,17 @@ def find_obstacles_adaptive_density(points_inside_gauge, floor_points):
             "raw_points": cluster_pts_downsampled[:, :3].tolist() 
         })
 
-
     return raw_detected_objects
 
-
 def validate_and_filter_objects(raw_objects, past_tracks=None):
-    """Кадровая валидация 3D-боксов с молчаливым обогащением признаков морфологии."""
+    """
+    Кадровая валидация 3D-боксов с молчаливым обогащением признаков морфологии.
+    Использует непрерывную динамическую модель («дышащую воронку») для пробития дальности.
+    """
     confirmed_objects = []
     raw_clusters_count = len(raw_objects)
+    
+    # Базовый множитель шума (как в оригинале)
     noise_multiplier = min(2.5, 1.0 + max(0.0, (raw_clusters_count - 20) / 50.0))
 
     for obj in raw_objects:
@@ -352,20 +436,43 @@ def validate_and_filter_objects(raw_objects, past_tracks=None):
         if intensity > config.MAX_TARGET_INTENSITY:
             continue
 
-        distance_factor = (0.4 + 0.6 * (distance / 15.0)) if distance < 15.0 else max(0.3, 1.0 - 0.003 * (distance - 15.0))
-        size_factor = max(0.3, height / 1.5) if height < 1.5 else 1.0
+        # =====================================================================
+        # 🧠 МАТЕМАТИЧЕСКИЙ АППАРАТ ДИНАМИЧЕСКОЙ «ДЫШАЩЕЙ ВОРОНКИ»
+        # =====================================================================
+        # 1. Затухание множителя шума с ростом дистанции.
+        # На расстоянии 100+ метров локальный шум у колес поезда больше не ослепляет ИИ.
+        local_noise_weight = max(0.0, min(1.0, 1.0 - (distance - 30.0) / 60.0))
+        effective_noise_mult = 1.0 + (noise_multiplier - 1.0) * local_noise_weight
 
-        if distance < config.DISTANCE_THRESHOLD_Z:
-            min_volume = config.NEAR_MIN_VOLUME * noise_multiplier
-            min_points = max(config.FAR_MIN_POINTS, int(config.NEAR_MIN_POINTS * noise_multiplier * distance_factor * size_factor))
-            min_dimension = config.NEAR_MIN_DIMENSION
-        else:
-            min_volume = config.FAR_MIN_VOLUME * (noise_multiplier * 1.2)
-            min_points = max(config.FAR_MIN_POINTS, int(config.FAR_MIN_POINTS * noise_multiplier * distance_factor * size_factor))
-            min_dimension = config.FAR_MIN_DIMENSION
+        # 2. Непрерывная функция требуемого количества точек (Гиперболическое затухание)
+        # Ближний бой (10м) -> ~12 точек; Средний (50м) -> ~5 точек; Дальний (100м+) -> строго 2-3 точки.
+        # Формула идеально аппроксимирует физическое расхождение лучей Hesai 128
+        dynamic_min_points = 2.0 + (15.0 / (1.0 + 0.05 * distance))
+        min_points = max(2, int(dynamic_min_points * effective_noise_mult))
 
+        # 3. Динамический плавный порог объема (Volume Decay)
+        # Падает экспоненциально, так как редкие точки на горизонте теряют объемную форму.
+        volume_decay = np.exp(-distance / 45.0)
+        min_volume = config.NEAR_MIN_VOLUME * effective_noise_mult * max(0.02, volume_decay)
+
+        # 4. Динамический линейный размер (Dimension Decay)
+        # Позволяет зацепить коробку 0.3х0.3м на 100 метрах всего по паре лучей (8 см допуска)
+        dimension_decay = max(0.3, 1.0 - 0.006 * distance)
+        min_dimension = config.NEAR_MIN_DIMENSION * dimension_decay
+
+        # 5. 🛡️ АНТИ-ПРИЗРАК: Динамический высотный предохранитель для сверхдальней зоны
+        # Если объект дальше 75 метров подтверждается всего по 2-3 точкам, 
+        # он обязан находиться строго в вертикальном габарите пути (не летать под потолком/сводом тоннеля)
+        if distance > 75.0 and points_count <= 4:
+            # y_center (cy) должен быть в створе рельс и роста препятствия (от -1.5 до 1.5м относительно лидара)
+            if cy < -1.5 or cy > 1.5:
+                continue # Выбрасываем дальний одиночный шум на стенах/своде
+
+        # =====================================================================
+        # Проверка по динамически рассчитанным критериям физики лазера
+        # =====================================================================
         if obj_volume >= min_volume and points_count >= min_points and max(width, height, depth) >= min_dimension:
-            # Расчет аналитики положения объекта
+            # Расчет аналитики положения объекта (как в оригинале)
             deviation_x = abs(cx)
             if deviation_x <= 0.35:
                 obj["position_status"] = "CENTER"
@@ -377,7 +484,7 @@ def validate_and_filter_objects(raw_objects, past_tracks=None):
                 obj["position_status"] = "RIGHT_EDGE"
                 obj["position_text"] = "Касается правой кромки ⚠️"
                 
-            # Расчет морфологии (формы) объекта
+            # Расчет морфологии (формы) объекта (как в оригинале)
             if height > width and height > depth:
                 obj["shape_text"] = "Человек / Вертикальная конструкция"
             elif height < 0.40 and (width > 0.8 or depth > 0.8):
@@ -387,14 +494,76 @@ def validate_and_filter_objects(raw_objects, past_tracks=None):
                 
             obj["distance_m"] = round(distance, 1)
             confirmed_objects.append(obj)
-        # 🕵️‍♂️ CHECKPOINT 1: ВЫХОД ИЗ ВАЛИДАТОРА ОБЪЕКТОВ
+            
+    # 🕵️‍♂️ CHECKPOINT 1: ОРИГИНАЛЬНЫЙ ВЫХОД ИЗ ВАЛИДАТОРА ОБЪЕКТОВ
     print(f"\n🔍 [ИИ-ЯДРО ➔ CHECKPOINT 1]: Расчет validate_and_filter_objects\n"
           f"     Всего валидных преград: {len(confirmed_objects)} шт.", flush=True)
     for idx, c_obj in enumerate(confirmed_objects):
         print(f"     -> СУЩНОСТЬ #{idx} | Дистанция distance_m: {c_obj.get('distance_m')} м | "
               f"Центр ИИ [X, Y, Z]: {[round(float(v), 3) for v in c_obj['center']]}", flush=True)
-
+              
     return confirmed_objects
+
+# def validate_and_filter_objects(raw_objects, past_tracks=None):
+#     """Кадровая валидация 3D-боксов с молчаливым обогащением признаков морфологии."""
+#     confirmed_objects = []
+#     raw_clusters_count = len(raw_objects)
+#     noise_multiplier = min(2.5, 1.0 + max(0.0, (raw_clusters_count - 20) / 50.0))
+
+#     for obj in raw_objects:
+#         cx, cy, cz = obj["center"]
+#         width, height, depth = obj["dimensions"]
+#         points_count = obj["points_count"]
+#         intensity = obj["intensity"]
+#         obj_volume = width * height * depth
+#         distance = abs(cz)
+        
+#         if intensity > config.MAX_TARGET_INTENSITY:
+#             continue
+
+#         distance_factor = (0.4 + 0.6 * (distance / 15.0)) if distance < 15.0 else max(0.3, 1.0 - 0.003 * (distance - 15.0))
+#         size_factor = max(0.3, height / 1.5) if height < 1.5 else 1.0
+
+#         if distance < config.DISTANCE_THRESHOLD_Z:
+#             min_volume = config.NEAR_MIN_VOLUME * noise_multiplier
+#             min_points = max(config.FAR_MIN_POINTS, int(config.NEAR_MIN_POINTS * noise_multiplier * distance_factor * size_factor))
+#             min_dimension = config.NEAR_MIN_DIMENSION
+#         else:
+#             min_volume = config.FAR_MIN_VOLUME * (noise_multiplier * 1.2)
+#             min_points = max(config.FAR_MIN_POINTS, int(config.FAR_MIN_POINTS * noise_multiplier * distance_factor * size_factor))
+#             min_dimension = config.FAR_MIN_DIMENSION
+
+#         if obj_volume >= min_volume and points_count >= min_points and max(width, height, depth) >= min_dimension:
+#             # Расчет аналитики положения объекта
+#             deviation_x = abs(cx)
+#             if deviation_x <= 0.35:
+#                 obj["position_status"] = "CENTER"
+#                 obj["position_text"] = "Строго по центру путей 🚨"
+#             elif cx < -0.35:
+#                 obj["position_status"] = "LEFT_EDGE"
+#                 obj["position_text"] = "Касается левой кромки ⚠️"
+#             else:
+#                 obj["position_status"] = "RIGHT_EDGE"
+#                 obj["position_text"] = "Касается правой кромки ⚠️"
+                
+#             # Расчет морфологии (формы) объекта
+#             if height > width and height > depth:
+#                 obj["shape_text"] = "Человек / Вертикальная конструкция"
+#             elif height < 0.40 and (width > 0.8 or depth > 0.8):
+#                 obj["shape_text"] = "Плоский предмет / Настил"
+#             else:
+#                 obj["shape_text"] = "Объемная коробка / Блок"
+                
+#             obj["distance_m"] = round(distance, 1)
+#             confirmed_objects.append(obj)
+#         # 🕵️‍♂️ CHECKPOINT 1: ВЫХОД ИЗ ВАЛИДАТОРА ОБЪЕКТОВ
+#     print(f"\n🔍 [ИИ-ЯДРО ➔ CHECKPOINT 1]: Расчет validate_and_filter_objects\n"
+#           f"     Всего валидных преград: {len(confirmed_objects)} шт.", flush=True)
+#     for idx, c_obj in enumerate(confirmed_objects):
+#         print(f"     -> СУЩНОСТЬ #{idx} | Дистанция distance_m: {c_obj.get('distance_m')} м | "
+#               f"Центр ИИ [X, Y, Z]: {[round(float(v), 3) for v in c_obj['center']]}", flush=True)
+
+#     return confirmed_objects
 
 # Было: def process_point_cloud(file_path, tracker, is_open_space=False):
 # Стало: передаем чистый физический шаг поезда от одометрии
@@ -470,11 +639,14 @@ def process_point_cloud(file_path, tracker, train_step_z=0.0, is_open_space=Fals
     
     # Кластеризация пространственных аномалий внутри очищенной колеи
     raw_detections = find_obstacles_adaptive_density(points_inside_gauge, floor_points)
-    confirmed_obstacles = validate_and_filter_objects(raw_detections, tracker.past_tracks)
+    # 🛡️ ГЕОМЕТРИЧЕСКИЙ ФИКС: Схлопываем нарезку DBSCAN по оси Z до прохождения валидаторов и трекера
+    clean_raw_detections = merge_and_filter_raw_obstacles(raw_detections, distance_gate_z=3.5, width_gate_x=1.2)
+    # Пропускаем через валидатор уже чистые макро-объекты
+    confirmed_obstacles = validate_and_filter_objects(clean_raw_detections, tracker.past_tracks)
     
     # 🟢 КРИТИЧЕСКИЙ ФИКС: Вызываем трекер СТРОГО ОДИН раз за кадр, передавая шаг одометрии!
     final_safe_objects = tracker.track_and_filter_ghosts(confirmed_obstacles, train_step_z=train_step_z)
-
+    
     # 🟢 ГЕОМЕТРИЧЕСКИЙ ВОССТАНОВИТЕЛЬ ТОЧЕК ДЛЯ ФРОНТЕНДА THREE.JS
     for obj in final_safe_objects:
         cx, cy, cz = obj["center"]

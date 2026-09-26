@@ -10,6 +10,7 @@ import numpy as np
 import open3d as o3d
 from sklearn.cluster import DBSCAN
 import time
+from metro_lidar.cold_starter import calculate_initial_velocity_voxels
 import metro_lidar.config as config
 
 def calculate_adaptive_fusion_shift(shift_rails, shift_walls, prev_velocity_kmh, rail_points_count, idx, dt=0.1):
@@ -165,9 +166,32 @@ class StableLidarOdometryV12:
         Инкапсулирует весь конвейер [Рельсы + Стены + ИИ-Шлюз] внутри ядра.
         Возвращает: (итоговый_сдвиг_z, rail_passport)
         """
+        # 🔍 ВЫВОДИМ ВХОДНЫЕ ПАРАМЕТРЫ ТАКТА В API:
+        if idx <= 2:
+            print(f"🔍 [ВХОД В ЯДРО]: Кадр idx={idx} | Текущая prev_velocity_kmh в памяти: {self.prev_velocity_kmh} км/ч", flush=True)
+            
         if not os.path.exists(file_path):
             return 0.0, None
-            
+        # =====================================================================
+        # 🚀 [ИИ-ПЕРЕХВАТ ХОЛОДНОГО СТАРТА V12] 🚀
+        # =====================================================================
+        # Если это самый первый кадр сессии, мы находимся в полной слепоте.
+        # Вызываем внешнюю боевую функцию, передавая ей путь к папке сценария.
+                # === ВНУТРИ update_odometry_fusion (idx == 0) ===
+        if idx == 0 and self.prev_velocity_kmh == 0.0:
+            try:
+                scene_dir = os.path.dirname(file_path)
+                start_speed_kmh = calculate_initial_velocity_voxels(scene_dir)
+                
+                # 🔍 ДОБАВЛЯЕМ ЭТОТ ПРИНТ ДЛЯ ПРОВЕРКИ ВЫХОДА ИЗ ФУНКЦИИ:
+                print(f"\n🔍 [СТАРТЕР ПРОВЕРКА 1]: Функция calculate_initial_velocity_voxels вернула: {start_speed_kmh} км/ч\n", flush=True)
+                
+                if start_speed_kmh > 1.0:
+                    self.prev_velocity_kmh = start_speed_kmh
+            except Exception as e:
+                print(f"   ⚠️ Ошибка холодного старта: {e}", flush=True)
+
+
         # Читаем сырые точки один раз за такт
         raw_points = np.fromfile(file_path, dtype=np.float32).reshape(-1, 4)
         
@@ -186,26 +210,36 @@ class StableLidarOdometryV12:
         if macro_cloud is not None:
             passports = self.build_passports_via_dbscan(macro_cloud)
             calculate_speed_trigger = bool(idx > 0)
-            shift_z_walls, matches_count, _ = self.associate_and_calculate_shift(
-                passports, dt, calculate_speed=calculate_speed_trigger
-            )
+            shift_z_walls, matches_count, _ = self.associate_and_calculate_shift(passports, dt, calculate_speed=calculate_speed_trigger, idx=idx)
+
         else:
             shift_z_walls, matches_count = 0.0, 0
 
+                # =====================================================================
         # 4. МАТЕМАТИЧЕСКОЕ СЛИЯНИЕ СКОРОСТЕЙ И ФИЛЬТРАЦИЯ СПАЙКОВ
+        # =====================================================================
         if idx > 0:
-            # Защищаем шлюз от None-значений, если один из алгоритмов моргнул
-            safe_rails = shift_z_rails if shift_z_rails is not None else 0.0
-            safe_walls = shift_z_walls if shift_z_walls is not None else 0.0
+            # Жестко берем модули сдвигов датчиков, чтобы убрать конфликт знаков!
+            safe_rails = np.abs(shift_z_rails) if shift_z_rails is not None else 0.0
+            safe_walls = np.abs(shift_z_walls) if shift_z_walls is not None else 0.0
             
             final_shift_z = calculate_adaptive_fusion_shift(
                 safe_rails, safe_walls, self.prev_velocity_kmh, current_rail_points_count, idx, dt
             )
-        else:
-            # На самом нулевом кадре поездки физический сдвиг всегда равен 0.0
-            final_shift_z = 0.0
             
+            calculated_speed_kmh = (float(final_shift_z) / dt) * 3.6
+            if calculated_speed_kmh < 0.2:
+                calculated_speed_kmh = 0.0
+                
+            self.prev_velocity_kmh = calculated_speed_kmh
+        else:
+            # На кадре 0 ИИ-пускач уже прописал скорость, ход равен 0
+            final_shift_z = 0.0
+
+        # 🟢 ВЕРНЫЙ ВЫХОД: Строка ретерна стоит НА ОДНОМ УРОВНЕ с if/else!
+        # Функция ГАРАНТИРОВАННО вернет кортеж (0.0, rail_passport) на кадре 0!
         return float(final_shift_z), rail_passport
+
 
 
     def compute_raw_rail_odo_shift(self, raw_points, dt=0.1):
@@ -415,7 +449,8 @@ class StableLidarOdometryV12:
         anchors_list.sort(key=lambda x: x["centroid"][2])
         return anchors_list
 
-    def associate_and_calculate_shift(self, curr_pso, dt=0.1, calculate_speed=False):
+    def associate_and_calculate_shift(self, curr_pso, dt=0.1, calculate_speed=False, idx=0):
+
         """ЭТАП 3: Каскадное ICP сопоставление кадра с Единой Хроно-Картой Якорей."""
         active_map = self.anchor_map
         
@@ -561,14 +596,40 @@ class StableLidarOdometryV12:
                 wall_side = "⬅️ ЛЕВОЕ КРЫЛО" if cx_map < 0 else "➡️ ПРАВОЕ КРЫЛО"
                 print(f"      📍 [ГЕОМЕТРИЯ ЭЯ]: Якорь #{m_obj['id']:03d} | Физический центр: X={cx_map:+.2f}м, Y={cy_map:+.2f}м, Z={cz_map:5.2f}м | Локация: {wall_side}", flush=True)
 
-        # --- ЧАСТЬ 3: ИСПРАВЛЕННЫЙ ФИЗИЧЕСКИЙ ДЕМПФЕР СТОЯНКИ И ТОРМОЖЕНИЯ V12.0 ---
+        # =====================================================================
+        # --- ЧАСТЬ 3: ИСПРАВЛЕННЫЙ ФИЗИЧЕСКИЙ ДЕМПФЕР СТОЯНКИ V12.0 (ИНЕРЦИОННЫЙ ЗАМОК) ---
+        # =====================================================================
         calculated_shift_z = compute_weighted_median(shifts, weights)
-        is_train_standing = bool(
-            np.less_equal(np.abs(calculated_shift_z), config.DEADBAND_STATIONARY_M) or 
-            (matched_count == 0) or
-            (self.prev_velocity_kmh < 1.0)
-        )
+        
+        # Разворачиваем триггеры для прецизионной аналитики
+        cond_deadband = bool(np.less_equal(np.abs(calculated_shift_z), config.DEADBAND_STATIONARY_M))
+        cond_no_matches = bool(matched_count == 0)
+        
+        # Паспортный порог: если поезд ехал быстрее 3.0 км/ч, потеря стен — это СЛЕПОТА, а не стоянка
+        is_moving_prior = bool(self.prev_velocity_kmh > 3.0)
 
+        # 🧠 ЖЕСТКИЙ ИНЕРЦИОННЫЙ ЗАМОК (СТРАТЕГИЯ УДЕРЖАНИЯ):
+        # Если ориентиры полностью потерялись на ходу, мы запрещаем демпферу занулять ход.
+        # Подставляем прецизионный шаг, рассчитанный строго на основе последней известной скорости.
+        if cond_no_matches and is_moving_prior:
+            # Сдвиг = (Скорость_км_ч / 3.6) * dt. В осях стен сдвиг идет со знаком минус
+            calculated_shift_z = -float((self.prev_velocity_kmh / 3.6) * dt)
+            is_train_standing = False
+            print(f"   🚨 [ИИ-ЯДРО V12 ИНЕРЦИЯ]: Ориентиры стен потеряны на ходу! Жестко удерживаю скорость: {self.prev_velocity_kmh:.2f} км/ч (Шаг: {calculated_shift_z*100:.1f} см)", flush=True)
+        else:
+            # В штатном режиме или около нуля — демпфер работает по мертвой зоне лазера
+            is_train_standing = cond_deadband or cond_no_matches
+
+        # Аналитический принт для сквозного контроля (idx проброшен в аргументы)
+        MIN_VELOCITY_STAND_THRESHOLD = getattr(config, "MIN_VELOCITY_STAND_THRESHOLD", 0.1)
+        cond_low_speed = bool(self.prev_velocity_kmh < MIN_VELOCITY_STAND_THRESHOLD)
+        
+        if idx <= 250:  # Расширяем видимость принтов, чтобы захватить такты 130+
+            print(f"🔍 [СТАРТЕР ПРОВЕРКА 3]: Кадр #{idx:03d} | Шаг такта Z: {calculated_shift_z*100:.2f} см | "
+                  f"Прошлая V: {self.prev_velocity_kmh:.2f} км/ч | "
+                  f"Триггеры -> Мертвая зона: {cond_deadband}, Нет стен: {cond_no_matches}, Инерция активна: {cond_no_matches and is_moving_prior}", flush=True)
+
+        # Обработка демпфера стоянки (срабатывает только при истинной остановке)
         if is_train_standing:
             self.stationary_accumulator += np.abs(calculated_shift_z)
             if bool(self.stationary_accumulator >= config.START_MOTION_THRESHOLD_M):
@@ -585,8 +646,9 @@ class StableLidarOdometryV12:
         else:
             self.blind_frames_counter = 0
 
-        # Хроно-управление картой памяти (Логика Сдвига и Деградации Якорей по оси Z)
-                # 🟢 ИСПРАВЛЕННЫЙ БЛОК ХРОНО-УПРАВЛЕНИЯ КАРТОЙ (СДВИГАЕМ СТРОГО ИНДЕКС 2)
+        # =====================================================================
+        # 🟢 ХРОНО-УПРАВЛЕНИЕ КАРТОЙ ПАМЯТИ ЯКОРЕЙ (СДВИГАЕМ СТРОГО ИНДЕКС 2)
+        # =====================================================================
         updated_map = []
         for m_idx, m_obj in enumerate(active_map):
             if m_idx in matched_map_indices:
@@ -595,7 +657,8 @@ class StableLidarOdometryV12:
             else:
                 m_obj["ttl"] -= 1
                 if bool(np.greater(m_obj["ttl"], 0)):
-                    # Сдвигаем строго координату Z (индекс 2) внутри списка центроида
+                    # Внимание: calculated_shift_z отрицательный в движении, 
+                    # вычитание (- calculated_shift_z) корректно смещает центроиды вперед
                     m_obj["centroid"][2] = float(m_obj["centroid"][2] - calculated_shift_z)
                     
                     m_macro_pts = np.array(m_obj["raw_points"])
