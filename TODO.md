@@ -170,6 +170,11 @@ source /opt/ros/humble/setup.bash
 ros2 bag play /app/for_hackathon/doubleT_obstacle/
 
 
+1. Сброс сетевой памяти FastDDS перед каждым запускомСамый надежный способ очистить зомби-сокеты внутри контейнера — принудительно очистить разделяемую память (Shared Memory) перед запуском ноды.Прямо в консоли Докера перед запуском пишите:bash# Очищает зависшие сегменты памяти FastDDS
+rm -rf /dev/shm/fastrtps_* 2>/dev/null || true
+
+docker cp test_lidar_frames/doubleT_platform metro_live_container:/app/for_hackathon/
+root@andreymazo-GF63-Thin-11UC:/app# ls -la /app/for_hackathon/doubleT_platform/
 ++++++++++++++++++
 
 +++++++++++++++++++++++++++++++++++++++++++++++++++++

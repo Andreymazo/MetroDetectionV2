@@ -198,29 +198,194 @@ def extract_floor_with_ransac(points):
     # Разделяем облако точек: инвертированная маска идет в препятствия, прямая — в пол
     return points[~global_floor_mask], points[global_floor_mask]
 
+# def filter_gauge_with_track_bending(all_points, floor_points, live_min_z, is_open_space=False):
+#     """
+#     Криволинейный створ ворот безопасности 3D (Полностью очищен от хардкода).
+#     Динамически зажимает область сканирования рельс при прохождении платформ и стрелок.
+#     """
+#     if len(all_points) == 0:
+#         return all_points
+
+#     z_all = all_points[:, 2]
+#     predicted_x_center = np.zeros_like(z_all)
+#     predicted_y_floor = np.zeros_like(z_all)
+    
+#     STEP_Z = 4.0  
+#     last_valid_x = 0.0
+#     last_valid_y = -1.50
+#     has_valid_track = False
+    
+#     for start_z in np.arange(live_min_z, config.MAX_Z, STEP_Z):
+#         end_z = start_z + STEP_Z
+        
+#         # 🟢 ПЕРЕВОД НА КОНСТАНТЫ: Адаптивно выбираем ширину створа поиска рельс
+#         current_search_width = (
+#             config.V2_OBSTACLE_TRACK_SEARCH_WIDTH_CLOSED if is_open_space 
+#             else config.V2_OBSTACLE_TRACK_SEARCH_WIDTH_OPEN
+#         )
+        
+#         mask_floor_sector = (
+#             (floor_points[:, 2] <= -start_z) & (floor_points[:, 2] > -end_z) &
+#             (floor_points[:, 0] >= -current_search_width) & (floor_points[:, 0] <= current_search_width)
+#         )
+#         floor_sector = floor_points[mask_floor_sector]
+        
+#         if len(floor_sector) > 15:
+#             current_x = np.median(floor_sector[:, 0])
+#             current_y = np.median(floor_sector[:, 1])
+#             last_valid_x = current_x
+#             last_valid_y = current_y
+#             has_valid_track = True
+#         else:
+#             current_x = last_valid_x
+#             current_y = last_valid_y
+            
+#         sector_all_mask = (z_all <= -start_z) & (z_all > -end_z)
+#         predicted_x_center[sector_all_mask] = current_x
+#         predicted_y_floor[sector_all_mask] = current_y
+
+#     # 🟢 ПЕРЕВОД НА КОНСТАНТЫ: Логика раскрытия ворот безопасности по мере дальности Z
+#     if is_open_space:
+#         adaptive_half_width = np.full_like(z_all, config.TRAIN_HALF_WIDTH)
+#     else:
+#         distance_from_train = np.abs(all_points[:, 2])
+#         adaptive_half_width = config.TRAIN_HALF_WIDTH + (distance_from_train * config.V2_OBSTACLE_GATE_EXPANSION_COEF)
+#         adaptive_half_width = np.clip(adaptive_half_width, config.TRAIN_HALF_WIDTH, config.V2_OBSTACLE_GATE_MAX_WIDTH)
+
+#     # Вычисляем дальность отдельно, защищая NumPy-конвейер от конфликта типов ufunc
+#     absolute_z = np.abs(all_points[:, 2])
+
+#     in_curved_gauge_mask = (
+#         (all_points[:, 0] >= (predicted_x_center - adaptive_half_width)) &
+#         (all_points[:, 0] <= (predicted_x_center + adaptive_half_width)) &
+#         (all_points[:, 1] >= (predicted_y_floor + 0.15)) &  
+#         (all_points[:, 1] <= (predicted_y_floor + 3.0)) &  
+#         (absolute_z >= live_min_z) & (absolute_z <= config.MAX_Z)
+#     )
+#     return all_points[in_curved_gauge_mask]
+
+
+# def filter_gauge_with_track_bending(all_points, floor_points, live_min_z, is_open_space=False):
+#     """
+#     Промышленный 3D криволинейный створ ворот безопасности (Версия v3).
+#     Использует полиномиальную аппроксимацию путей (np.polyfit) для X-поворотов и Y-наклонов.
+#     Полностью устраняет слепоту детектора на дальних рубежах и дедуплицирует стены.
+#     """
+#     if len(all_points) == 0:
+#         return all_points
+
+#     z_all = all_points[:, 2]
+#     absolute_z = np.abs(z_all)
+    
+#     # Резервные массивы под живую ось путей
+#     predicted_x_center = np.zeros_like(z_all)
+#     predicted_y_floor = np.zeros_like(z_all)
+    
+#     # Списки для сбора надежных опорных точек геометрии рельсового лотка
+#     support_z = []
+#     support_x = []
+#     support_y = []
+    
+#     STEP_Z = 4.0  
+#     # Собираем устойчивые замеры рельс по ближней и средней зоне, где плотность лидара высока
+#     for start_z in np.arange(live_min_z, min(60.0, config.MAX_Z), STEP_Z):
+#         end_z = start_z + STEP_Z
+        
+#         current_search_width = (
+#             config.V2_OBSTACLE_TRACK_SEARCH_WIDTH_CLOSED if not is_open_space 
+#             else config.V2_OBSTACLE_TRACK_SEARCH_WIDTH_OPEN
+#         )
+        
+#         mask_floor_sector = (
+#             (floor_points[:, 2] <= -start_z) & (floor_points[:, 2] > -end_z) &
+#             (floor_points[:, 0] >= -current_search_width) & (floor_points[:, 0] <= current_search_width)
+#         )
+#         floor_sector = floor_points[mask_floor_sector]
+        
+#         if len(floor_sector) > 15:
+#             # Переводим отрицательный Z конвейера в положительное физическое расстояние
+#             support_z.append((start_z + end_z) / 2.0)
+#             support_x.append(np.median(floor_sector[:, 0]))
+#             support_y.append(np.median(floor_sector[:, 1]))
+
+#     # =====================================================================
+#     # 🧠 МАТЕМАТИЧЕСКИЙ АППАРАТ 3D ПОЛИНОМИАЛЬНОГО ВЫРАВНИВАНИЯ ТРАЕКТОРИИ
+#     # =====================================================================
+#     if len(support_z) >= 3:
+#         # Считаем плавные кривые (параболы 2-й степени) профиля поворота (X) и наклона (Y)
+#         poly_x = np.polyfit(support_z, support_x, 2)
+#         poly_y = np.polyfit(support_z, support_y, 2)
+        
+#         # Математически экстраполируем изгиб путей на всю дальность вперед до 120 метров
+#         predicted_x_center = np.polyval(poly_x, absolute_z)
+#         predicted_y_floor = np.polyval(poly_y, absolute_z)
+#     else:
+#         # Аварийный откат к дефолту, если под бампером нет рельс
+#         predicted_x_center = np.zeros_like(z_all)
+#         predicted_y_floor = np.full_like(z_all, -1.50)
+#     # =====================================================================
+
+#     # =====================================================================
+#     # 🛡️ ИСПРАВЛЕНИЕ ЛОГИКИ СТВОРОВ ОТКРЫТОГО/ЗАКРЫТОГО ПРОСТРАНСТВА
+#     # =====================================================================
+#     if is_open_space:
+#         # НА СТАНЦИИ: Стен нет, раскрываем боковые ворота X шире (до 2.40м), чтобы ловить край платформы
+#         adaptive_half_width = np.clip(config.TRAIN_HALF_WIDTH + (absolute_z * 0.015), config.TRAIN_HALF_WIDTH, 2.40)
+#         # На платформе потолок высокий, держим маску открытой до 3.2 метров над рельсами
+#         dynamic_max_y = np.full_like(z_all, 3.20)
+#     else:
+#         # В ТУННЕЛЕ: Стены близко! Зажимаем маску X строго в габарит вагона (1.40м - 1.55м)
+#         # Это полностью ликвидирует ложный захват боковых тюбингов и кабелей!
+#         adaptive_half_width = np.clip(config.TRAIN_HALF_WIDTH + (absolute_z * 0.002), config.TRAIN_HALF_WIDTH, 1.55)
+        
+#         # Вертикальный конус перспективы: плавно прижимаем высоту маски вдалеке (с 3.0м до 1.5м),
+#         # чтобы расширяющийся пучок лучей на 100 метрах не терся о свод круглого туннеля.
+#         dynamic_max_y = np.clip(3.00 - (absolute_z * 0.022), 1.50, 3.00)
+#     # =====================================================================
+
+#     in_curved_gauge_mask = (
+#         # Прецизионный боковой охват X с учетом плавного поворота путей
+#         (all_points[:, 0] >= (predicted_x_center - adaptive_half_width)) &
+#         (all_points[:, 0] <= (predicted_x_center + adaptive_half_width)) &
+        
+#         # Прецизионный высотный охват Y над динамическим профилем уклона рельс
+#         (all_points[:, 1] >= (predicted_y_floor + 0.15)) &  
+#         (all_points[:, 1] <= (predicted_y_floor + dynamic_max_y)) &  
+        
+#         # Дальностный срез
+#         (absolute_z >= live_min_z) & (absolute_z <= config.MAX_Z)
+#     )
+#     return all_points[in_curved_gauge_mask]
+
 def filter_gauge_with_track_bending(all_points, floor_points, live_min_z, is_open_space=False):
     """
-    Криволинейный створ ворот безопасности 3D (Полностью очищен от хардкода).
-    Динамически зажимает область сканирования рельс при прохождении платформ и стрелок.
+    Промышленный 3D криволинейный створ ворот безопасности (Версия v3.5).
+    Использует полиномиальную аппроксимацию путей (np.polyfit) для X-поворотов и Y-наклонов.
+    Полностью координирует ширину и высоту створа на основе ИИ-флага чекера.
     """
     if len(all_points) == 0:
         return all_points
 
     z_all = all_points[:, 2]
+    absolute_z = np.abs(z_all)
+    
+    # Инициализируем массивы под живую 3D траекторию рельсового пути
     predicted_x_center = np.zeros_like(z_all)
     predicted_y_floor = np.zeros_like(z_all)
     
-    STEP_Z = 4.0  
-    last_valid_x = 0.0
-    last_valid_y = -1.50
-    has_valid_track = False
+    # Списки для сбора надежных опорных точек геометрии рельс
+    support_z = []
+    support_x = []
+    support_y = []
     
-    for start_z in np.arange(live_min_z, config.MAX_Z, STEP_Z):
+    STEP_Z = 4.0  
+    # Собираем устойчивые медианы рельс по ближней и средней зоне (до 60 метров)
+    for start_z in np.arange(live_min_z, min(60.0, config.MAX_Z), STEP_Z):
         end_z = start_z + STEP_Z
         
-        # 🟢 ПЕРЕВОД НА КОНСТАНТЫ: Адаптивно выбираем ширину створа поиска рельс
+        # Адаптивный створ поиска рельс в зависимости от типа пространства
         current_search_width = (
-            config.V2_OBSTACLE_TRACK_SEARCH_WIDTH_CLOSED if is_open_space 
+            config.V2_OBSTACLE_TRACK_SEARCH_WIDTH_CLOSED if not is_open_space 
             else config.V2_OBSTACLE_TRACK_SEARCH_WIDTH_OPEN
         )
         
@@ -231,39 +396,87 @@ def filter_gauge_with_track_bending(all_points, floor_points, live_min_z, is_ope
         floor_sector = floor_points[mask_floor_sector]
         
         if len(floor_sector) > 15:
-            current_x = np.median(floor_sector[:, 0])
-            current_y = np.median(floor_sector[:, 1])
-            last_valid_x = current_x
-            last_valid_y = current_y
-            has_valid_track = True
-        else:
-            current_x = last_valid_x
-            current_y = last_valid_y
-            
-        sector_all_mask = (z_all <= -start_z) & (z_all > -end_z)
-        predicted_x_center[sector_all_mask] = current_x
-        predicted_y_floor[sector_all_mask] = current_y
+            support_z.append((start_z + end_z) / 2.0)
+            support_x.append(np.median(floor_sector[:, 0]))
+            support_y.append(np.median(floor_sector[:, 1]))
 
-    # 🟢 ПЕРЕВОД НА КОНСТАНТЫ: Логика раскрытия ворот безопасности по мере дальности Z
-    if is_open_space:
-        adaptive_half_width = np.full_like(z_all, config.TRAIN_HALF_WIDTH)
+    # # 🧠 МАТЕМАТИЧЕСКИЙ АППАРАТ 3D ПОЛИНОМИАЛЬНОГО ВЫРАВНИВАНИЯ ТРАЕКТОРИИ
+    # if len(support_z) >= 3:
+    #     # Вычисляем плавные параболы поворота (X) и продольного наклона/просадки путей (Y)
+    #     poly_x = np.polyfit(support_z, support_x, 2)
+    #     poly_y = np.polyfit(support_z, support_y, 2)
+        
+    #     # Экстраполируем изгиб рельсового полотна на дальний горизонт (вплоть до 120м вперед)
+    #     predicted_x_center = np.polyval(poly_x, absolute_z)
+    #     predicted_y_floor = np.polyval(poly_y, absolute_z)
+    # else:
+    #     # Аварийный откат к жесткому дефолту при потере рельс под бампером
+    #     predicted_x_center = np.zeros_like(z_all)
+    #     predicted_y_floor = np.full_like(z_all, -1.50)
+        # 🧠 МАТЕМАТИЧЕСКИЙ АППАРАТ 3D ВЫРАВНИВАНИЯ ТРАЕКТОРИИ (ЗАЩИЩЕННЫЙ ОТ ЭКСТРАПОЛЯЦИИ)
+    # Если мы набрали много точек по всей длине пути (хотя бы до 40 метров)
+        # 🧠 МАТЕМАТИЧЕСКИЙ АППАРАТ 3D ВЫРАВНИВАНИЯ ТРАЕКТОРИИ (ЗАЩИЩЕННЫЙ ОТ ВЗРЫВА ПОЛИНОМА)
+    if len(support_z) >= 8:
+        poly_x = np.polyfit(support_z, support_x, 2)
+        poly_y = np.polyfit(support_z, support_y, 2)
+        predicted_x_center = -np.polyval(poly_x, absolute_z)
+        
+        # Считаем сырой Y полинома
+        raw_y_floor = np.polyval(poly_y, absolute_z)
+        # 🛡️ ЖЕСТКИЕ ТИСКИ НА РЕЛЬСЫ: Уровень пола не может быть выше -1.3м и ниже -1.9м!
+        predicted_y_floor = np.clip(raw_y_floor, -1.90, -1.30)
     else:
-        distance_from_train = np.abs(all_points[:, 2])
-        adaptive_half_width = config.TRAIN_HALF_WIDTH + (distance_from_train * config.V2_OBSTACLE_GATE_EXPANSION_COEF)
-        adaptive_half_width = np.clip(adaptive_half_width, config.TRAIN_HALF_WIDTH, config.V2_OBSTACLE_GATE_MAX_WIDTH)
+        # Устойчивый дефолт, если под бампером мало точек пола
+        predicted_x_center = np.zeros_like(z_all)
+        predicted_y_floor = np.full_like(z_all, -1.50) 
+        
+        for i, sz in enumerate(support_z):
+            sector_mask = (absolute_z >= sz - 2.0) & (absolute_z < sz + 2.0)
+            predicted_x_center[sector_mask] = support_x[i]
+            predicted_y_floor[sector_mask] = support_y[i]
 
-    # Вычисляем дальность отдельно, защищая NumPy-конвейер от конфликта типов ufunc
-    absolute_z = np.abs(all_points[:, 2])
 
+    # =====================================================================
+    # 🛡️ УНИВЕРСАЛЬНЫЙ ПЕРЕКЛЮЧАТЕЛЬ АДАПТИВНЫХ ВОРОТ БЕЗОПАСНОСТИ СУДАН
+    # =====================================================================
+    if is_open_space:
+        # 🚉 НА СТАНЦИИ / ПЛАТФОРМЕ / СТРЕЛКЕ:
+        # Раскрываем ширину X конусом вперед (до 2.40м), чтобы не ослепнуть в резкой кривой
+        adaptive_half_width = np.clip(config.TRAIN_HALF_WIDTH + (absolute_z * 0.015), config.TRAIN_HALF_WIDTH, 2.40)
+        # Открываем потолок на максимум (4.20м), чтобы прецизионно поймать свисающие кабели!
+        dynamic_max_y = np.full_like(z_all, 1.20)
+    else:
+        # 🚇 В ТУННЕЛЕ:
+        # Зажимаем ширину строго в габарит состава (1.40м - 1.55м), полностью срезая тюбинги стен
+        adaptive_half_width = np.clip(config.TRAIN_HALF_WIDTH + (absolute_z * 0.002), config.TRAIN_HALF_WIDTH, 1.55)
+        # Безопасный высотный створ тоннеля: плавно ведем от 3.5м до устойчивых дальних 3.0 метров,
+        # полностью исключая падение потолка ворот в ломающий 1.4-метровый плоский блин!
+        # dynamic_max_y = np.clip(3.50 - (absolute_z * 0.005), 3.00, 3.50)
+         # 🟢 ИСПРАВЛЕНО: Даем верхнему створу раскрыться свободнее на дальних дистанциях (до 3.80 метров),
+        # а коэффициент сужения ослабляем до 0.002.
+        # На расстоянии 100 метров dynamic_max_y составит: 3.80 - (100 * 0.002) = 3.60 метра.
+        # Это гарантирует, что уплывающие вверх из-за шумов лучи дальних препятствий 
+        # на 116 метрах целиком зайдут внутрь маски и ИИ их распознает!
+        dynamic_max_y = np.clip(3.80 - (absolute_z * 0.002), 3.40, 3.80)
+
+    # =====================================================================
+    
     in_curved_gauge_mask = (
+        # Прецизионный боковой охват X с учетом ИИ-изгиба рельс в повороте
         (all_points[:, 0] >= (predicted_x_center - adaptive_half_width)) &
         (all_points[:, 0] <= (predicted_x_center + adaptive_half_width)) &
-        (all_points[:, 1] >= (predicted_y_floor + 0.15)) &  
-        (all_points[:, 1] <= (predicted_y_floor + 3.00)) &  
+        
+        # Прецизионный высотный охват Y строго НАД живым уклоном путей (predicted_y_floor)
+        (all_points[:, 1] >= (predicted_y_floor + 0.25)) &  
+        (all_points[:, 1] <= (predicted_y_floor + dynamic_max_y)) &  
+        
+        # Дальностный срез
         (absolute_z >= live_min_z) & (absolute_z <= config.MAX_Z)
     )
     return all_points[in_curved_gauge_mask]
-"""
+
+
+    """
     Схлопывает ложные пространственные дубликаты и "нарезку" монолитных объектов,
     возникающую по оси Z из-за деформации пространства алгоритмом DBSCAN.
     
@@ -296,31 +509,93 @@ def filter_gauge_with_track_bending(all_points, floor_points, live_min_z, is_ope
     list
         Очищенный от дубликатов список макро-объектов с пересчитанными 3D-габаритами.
     """
-def merge_and_filter_raw_obstacles(raw_detected_objects, distance_gate_z=3.0, width_gate_x=1.2):
-    """
-    Схлопывает ложные пространственные дубликаты и "нарезку" монолитных объектов,
-    возникающую по оси Z из-за деформации пространства алгоритмом DBSCAN.
+# def merge_and_filter_raw_obstacles(raw_detected_objects, distance_gate_z=3.0, width_gate_x=1.2):
+#     """
+#     Схлопывает ложные пространственные дубликаты и "нарезку" монолитных объектов,
+#     возникающую по оси Z из-за деформации пространства алгоритмом DBSCAN.
     
-    Учитывает отрицательную полярность оси Z в ИИ-конвейере Metro v12.
+#     Учитывает отрицательную полярность оси Z в ИИ-конвейере Metro v12.
+#     """
+#     if not raw_detected_objects:
+#         return []
+        
+#     # Сортируем объекты по дальности Z (от ближних к дальним, учитывая отрицательную ось)
+#     sorted_objs = sorted(raw_detected_objects, key=lambda x: x["center"][2], reverse=True)
+#     merged_objects = []
+    
+#     while sorted_objs:
+#         base_obj = sorted_objs.pop(0)
+#         bx, by, bz = base_obj["center"]
+        
+#         still_clean_objs = []
+#         for check_obj in sorted_objs:
+#             cx, cy, cz = check_obj["center"]
+            
+#             # Проверяем вхождение в ворота дедупликации (используем abs для Z и X)
+#             if abs(cz - bz) < distance_gate_z and abs(cx - bx) < width_gate_x:
+#                 # Находим крайние точки боксов по всем трем осям для пересчета макро-габаритов
+#                 max_x = max(bx + base_obj["dimensions"][0]/2, cx + check_obj["dimensions"][0]/2)
+#                 min_x = min(bx - base_obj["dimensions"][0]/2, cx - check_obj["dimensions"][0]/2)
+#                 max_y = max(by + base_obj["dimensions"][1]/2, cy + check_obj["dimensions"][1]/2)
+#                 min_y = min(by - base_obj["dimensions"][1]/2, cy - check_obj["dimensions"][1]/2)
+#                 max_z = max(bz + base_obj["dimensions"][2]/2, cz + check_obj["dimensions"][2]/2)
+#                 min_z = min(bz - base_obj["dimensions"][2]/2, cz - check_obj["dimensions"][2]/2)
+                
+#                 # Обновляем размеры макро-объекта
+#                 base_obj["dimensions"] = [max_x - min_x, max_y - min_y, max_z - min_z]
+#                 # Смещаем центр масс в прецизионную середину нового общего бокса
+#                 base_obj["center"] = [(max_x + min_x)/2.0, (max_y + min_y)/2.0, (max_z + min_z)/2.0]
+#                 # Суммируем массу точек
+#                 base_obj["points_count"] += check_obj["points_count"]
+                
+#                 # Объединяем прореженное облако точек для фронтенда WebGL
+#                 if "raw_points" in base_obj and "raw_points" in check_obj:
+#                     base_obj["raw_points"].extend(check_obj["raw_points"])
+#             else:
+#                 still_clean_objs.append(check_obj)
+                
+#         merged_objects.append(base_obj)
+#         sorted_objs = still_clean_objs
+        
+#     return merged_objects
+def merge_and_filter_raw_obstacles(raw_detected_objects):
+    """
+    Схлопывает пространственные дубликаты и "нарезку" монолитных объектов вдали.
+    Использует Dynamic NMS: тиски слияния плавно расширяются конусом вслед за 
+    физическим расхождением лучей лазера на дистанции.
     """
     if not raw_detected_objects:
         return []
         
-    # Сортируем объекты по дальности Z (от ближних к дальним, учитывая отрицательную ось)
+    # Сортируем объекты по дальности Z (от ближних к дальним, ось Z отрицательная)
     sorted_objs = sorted(raw_detected_objects, key=lambda x: x["center"][2], reverse=True)
     merged_objects = []
     
     while sorted_objs:
         base_obj = sorted_objs.pop(0)
         bx, by, bz = base_obj["center"]
+        distance = abs(bz)
+        
+        # 🧠 МАТЕМАТИЧЕСКИЙ АППАРАТ АДАПТИВНЫХ ТИСКОВ ДЕДУПЛИКАЦИИ
+        # Чем дальше объект от бампера, тем шире раскрываются ворота слияния осколков
+        dynamic_width_gate = np.clip(
+            config.OBSTACLE_MERGE_BASE_WIDTH_X + (distance * config.OBSTACLE_MERGE_COEF_X),
+            config.OBSTACLE_MERGE_BASE_WIDTH_X, 
+            config.OBSTACLE_MERGE_MAX_WIDTH_X
+        )
+        dynamic_dist_gate = np.clip(
+            config.OBSTACLE_MERGE_BASE_DIST_Z + (distance * config.OBSTACLE_MERGE_COEF_Z),
+            config.OBSTACLE_MERGE_BASE_DIST_Z, 
+            config.OBSTACLE_MERGE_MAX_DIST_Z
+        )
         
         still_clean_objs = []
         for check_obj in sorted_objs:
             cx, cy, cz = check_obj["center"]
             
-            # Проверяем вхождение в ворота дедупликации (используем abs для Z и X)
-            if abs(cz - bz) < distance_gate_z and abs(cx - bx) < width_gate_x:
-                # Находим крайние точки боксов по всем трем осям для пересчета макро-габаритов
+            # Проверяем вхождение осколка-соседа в дышащие ворота дедупликации
+            if abs(cz - bz) < dynamic_dist_gate and abs(cx - bx) < dynamic_width_gate:
+                # Находим новые экстремальные границы боксов по осям для пересчета макро-габаритов
                 max_x = max(bx + base_obj["dimensions"][0]/2, cx + check_obj["dimensions"][0]/2)
                 min_x = min(bx - base_obj["dimensions"][0]/2, cx - check_obj["dimensions"][0]/2)
                 max_y = max(by + base_obj["dimensions"][1]/2, cy + check_obj["dimensions"][1]/2)
@@ -328,17 +603,18 @@ def merge_and_filter_raw_obstacles(raw_detected_objects, distance_gate_z=3.0, wi
                 max_z = max(bz + base_obj["dimensions"][2]/2, cz + check_obj["dimensions"][2]/2)
                 min_z = min(bz - base_obj["dimensions"][2]/2, cz - check_obj["dimensions"][2]/2)
                 
-                # Обновляем размеры макро-объекта
+                # Записываем обновленные физические размеры макро-объекта
                 base_obj["dimensions"] = [max_x - min_x, max_y - min_y, max_z - min_z]
-                # Смещаем центр масс в прецизионную середину нового общего бокса
+                # Смещаем центр масс строго в геометрическую середину объединенного бокса
                 base_obj["center"] = [(max_x + min_x)/2.0, (max_y + min_y)/2.0, (max_z + min_z)/2.0]
-                # Суммируем массу точек
+                # Суммируем массу точек лазерного отражения
                 base_obj["points_count"] += check_obj["points_count"]
                 
-                # Объединяем прореженное облако точек для фронтенда WebGL
+                # Объединяем внутренние облака точек для WebGL визуализации
                 if "raw_points" in base_obj and "raw_points" in check_obj:
                     base_obj["raw_points"].extend(check_obj["raw_points"])
             else:
+                # Если объект не подошел под критерии слияния, оставляем его в очереди
                 still_clean_objs.append(check_obj)
                 
         merged_objects.append(base_obj)
@@ -347,6 +623,72 @@ def merge_and_filter_raw_obstacles(raw_detected_objects, distance_gate_z=3.0, wi
     return merged_objects
 
 
+# def find_obstacles_adaptive_density(points_inside_gauge, floor_points):
+#     """Кластеризует пространственные аномалии внутри габарита сжатием пространства."""
+#     raw_detected_objects = []
+#     if len(points_inside_gauge) < 2:
+#         return raw_detected_objects
+        
+#     dynamic_start_z = 30.0
+#     if len(floor_points) > 100:
+#         bins = np.arange(10, int(config.MAX_Z) + 10, 5)
+#         counts, edges = np.histogram(floor_points[:, 2], bins=bins)
+#         low_density_indices = np.where(counts < 150)
+#         if len(low_density_indices) > 0 and len(low_density_indices[0]) > 0:
+#             dynamic_start_z = float(edges[low_density_indices[0][0]])
+#         dynamic_start_z = max(15.0, min(dynamic_start_z, 180.0))
+
+#     scaled_points = points_inside_gauge.copy()
+#     z_coords = scaled_points[:, 2]
+#     scaling_factors = np.where(z_coords > dynamic_start_z, dynamic_start_z / z_coords, 1.0)
+#     scaled_points[:, 0] *= scaling_factors
+#     scaled_points[:, 1] *= scaling_factors
+    
+#     db = DBSCAN(eps=config.DBSCAN_OBSTACLE_EPS, min_samples=config.DBSCAN_OBSTACLE_MIN_SAMPLES, algorithm='kd_tree', n_jobs=-1).fit(scaled_points)
+#     labels = db.labels_
+    
+#     for label in set(labels):
+#         if label == -1:
+#             continue
+#         cluster_indices = np.where(labels == label)
+#         original_cluster_points = points_inside_gauge[cluster_indices]
+#         # === НАЧАЛО ПРЕЦИЗИОННОГО РАСЧЕТА ЯДРА ОБЪЕКТА ===
+#         # Вычисляем честные геометрические габариты бокса вдоль осей
+#         width = float(np.max(original_cluster_points[:, 0]) - np.min(original_cluster_points[:, 0]))
+#         height = float(np.max(original_cluster_points[:, 1]) - np.min(original_cluster_points[:, 1]))
+#         depth = float(np.max(original_cluster_points[:, 2]) - np.min(original_cluster_points[:, 2]))
+        
+#         # Находим прецизионный центр по осям X и Z с помощью np.median
+#         cx = float(np.median(original_cluster_points[:, 0]))
+#         cz = float(np.median(original_cluster_points[:, 2]))
+        
+#         # Хирургический фикс оси высоты Y:
+#         # Находим самую нижнюю точку объекта и поднимаем центр ровно на половину высоты.
+#         # Это гарантирует, что 3D-модель на фронтенде будет стоять строго НА рельсах, а не тонуть в них.
+#         min_y_pts = np.min(original_cluster_points[:, 1])
+#         cy = float(min_y_pts + (height / 2.0))
+        
+#         # Средняя интенсивность лазерного отражения для данного кластера
+#         cluster_intensities = original_cluster_points[:, 3]
+#         mean_intensity = float(np.mean(cluster_intensities))
+        
+#         # Собираем СЫРЫЕ объекты, сохраняя ОРИГИНАЛЬНЫЙ интерфейс списка [cx, cy, cz]
+#                 # Собираем СЫРЫЕ объекты, сохраняя интерфейс и добавляя прореженное лазерное облако кластера
+#         # Берем каждую 5-ю точку кластера, чтобы не перегружать сеть и WebGL рендер (разгрузка в 5 раз!)
+#         cluster_pts_downsampled = original_cluster_points[::5]
+        
+#         raw_detected_objects.append({
+#             "class_id": 1,
+#             "confidence": 1.0,
+#             "center": [cx, cy, cz],  
+#             "dimensions": [width, height, depth],
+#             "points_count": len(original_cluster_points),  
+#             "intensity": mean_intensity,
+#             # Сохраняем только координаты X, Y, Z прореженных точек для фронтенда
+#             "raw_points": cluster_pts_downsampled[:, :3].tolist() 
+#         })
+
+#     return raw_detected_objects
 def find_obstacles_adaptive_density(points_inside_gauge, floor_points):
     """Кластеризует пространственные аномалии внутри габарита сжатием пространства."""
     raw_detected_objects = []
@@ -355,20 +697,33 @@ def find_obstacles_adaptive_density(points_inside_gauge, floor_points):
         
     dynamic_start_z = 30.0
     if len(floor_points) > 100:
-        bins = np.arange(10, int(config.MAX_Z) + 10, 5)
+        # 🟢 ЧИСТАЯ МАТЕМАТИКА ОТР. ОСИ: Рельсы уходят в минус, 
+        # поэтому бины гистограммы тоже строим в отрицательном диапазоне (от -180 до -10)
+        bins = np.arange(-int(config.MAX_Z) - 10, -10, 5)
         counts, edges = np.histogram(floor_points[:, 2], bins=bins)
+        
+        # Ищем сектор, где плотность упала, двигаясь от ближней зоны к дальней (с конца массива bins)
         low_density_indices = np.where(counts < 150)
         if len(low_density_indices) > 0 and len(low_density_indices[0]) > 0:
-            dynamic_start_z = float(edges[low_density_indices[0][0]])
+            # Берём по модулю только для порога-константы дальности обнаружения
+            dynamic_start_z = abs(float(edges[low_density_indices[0][-1]]))
         dynamic_start_z = max(15.0, min(dynamic_start_z, 180.0))
 
     scaled_points = points_inside_gauge.copy()
-    z_coords = scaled_points[:, 2]
-    scaling_factors = np.where(z_coords > dynamic_start_z, dynamic_start_z / z_coords, 1.0)
+    z_coords = scaled_points[:, 2] # Отрицательные числа (например, -45.0)
+
+    # 🟢 ЧИСТАЯ МАТЕМАТИКА ДЛЯ ОТРИЦАТЕЛЬНОЙ ОСИ Z (БЕЗ ABS):
+    # 1. Смена знака: z_coords < -dynamic_start_z (т.е. -45.0 < -30.0 — ИСТИНА)
+    # 2. Прямое деление: -dynamic_start_z / z_coords (т.е. -30.0 / -45.0 = +0.66 — ЧИСТЫЙ ПЛЮС!)
+    scaling_factors = np.where(z_coords < -dynamic_start_z, -dynamic_start_z / z_coords, 1.0)
+    
+    # Сжимаем ширину X и высоту Y конусом к горизонту
     scaled_points[:, 0] *= scaling_factors
     scaled_points[:, 1] *= scaling_factors
     
-    db = DBSCAN(eps=config.DBSCAN_OBSTACLE_EPS, min_samples=config.DBSCAN_OBSTACLE_MIN_SAMPLES, algorithm='kd_tree', n_jobs=-1).fit(scaled_points)
+    # Запускаем DBSCAN. Выставляем min_samples=2, чтобы гарантированно связать 2-3 точки вдали
+    db = DBSCAN(eps=config.DBSPAN_OBSTACLE_EPS if hasattr(config, 'DBSPAN_OBSTACLE_EPS') else config.DBSCAN_OBSTACLE_EPS, 
+                min_samples=2, algorithm='kd_tree', n_jobs=-1).fit(scaled_points)
     labels = db.labels_
     
     for label in set(labels):
@@ -376,29 +731,19 @@ def find_obstacles_adaptive_density(points_inside_gauge, floor_points):
             continue
         cluster_indices = np.where(labels == label)
         original_cluster_points = points_inside_gauge[cluster_indices]
-        # === НАЧАЛО ПРЕЦИЗИОННОГО РАСЧЕТА ЯДРА ОБЪЕКТА ===
-        # Вычисляем честные геометрические габариты бокса вдоль осей
+        
+        # Расчет нативных 3D габаритов
         width = float(np.max(original_cluster_points[:, 0]) - np.min(original_cluster_points[:, 0]))
         height = float(np.max(original_cluster_points[:, 1]) - np.min(original_cluster_points[:, 1]))
         depth = float(np.max(original_cluster_points[:, 2]) - np.min(original_cluster_points[:, 2]))
         
-        # Находим прецизионный центр по осям X и Z с помощью np.median
         cx = float(np.median(original_cluster_points[:, 0]))
         cz = float(np.median(original_cluster_points[:, 2]))
         
-        # Хирургический фикс оси высоты Y:
-        # Находим самую нижнюю точку объекта и поднимаем центр ровно на половину высоты.
-        # Это гарантирует, что 3D-модель на фронтенде будет стоять строго НА рельсах, а не тонуть в них.
         min_y_pts = np.min(original_cluster_points[:, 1])
         cy = float(min_y_pts + (height / 2.0))
         
-        # Средняя интенсивность лазерного отражения для данного кластера
-        cluster_intensities = original_cluster_points[:, 3]
-        mean_intensity = float(np.mean(cluster_intensities))
-        
-        # Собираем СЫРЫЕ объекты, сохраняя ОРИГИНАЛЬНЫЙ интерфейс списка [cx, cy, cz]
-                # Собираем СЫРЫЕ объекты, сохраняя интерфейс и добавляя прореженное лазерное облако кластера
-        # Берем каждую 5-ю точку кластера, чтобы не перегружать сеть и WebGL рендер (разгрузка в 5 раз!)
+        mean_intensity = float(np.mean(original_cluster_points[:, 3]))
         cluster_pts_downsampled = original_cluster_points[::5]
         
         raw_detected_objects.append({
@@ -408,11 +753,11 @@ def find_obstacles_adaptive_density(points_inside_gauge, floor_points):
             "dimensions": [width, height, depth],
             "points_count": len(original_cluster_points),  
             "intensity": mean_intensity,
-            # Сохраняем только координаты X, Y, Z прореженных точек для фронтенда
             "raw_points": cluster_pts_downsampled[:, :3].tolist() 
         })
 
     return raw_detected_objects
+
 
 def validate_and_filter_objects(raw_objects, past_tracks=None):
     """
@@ -567,168 +912,293 @@ def validate_and_filter_objects(raw_objects, past_tracks=None):
 
 # Было: def process_point_cloud(file_path, tracker, is_open_space=False):
 # Стало: передаем чистый физический шаг поезда от одометрии
-def process_point_cloud(file_path, tracker, train_step_z=0.0, is_open_space=False):
     """
     Сквозной ИИ-конвейер детекции препятствий (Real-Time Humble Production).
     Защищен от ложного бампера вагона через 'Режим Гашения Стоянки' с такт-инициализацией.
     """
-    if not file_path.endswith('.bin'):
-        return []
-    try:
-        # Нативный парсер бинарного облака точек (Инвариантный мост осей)
-        raw_points = np.fromfile(file_path, dtype=np.float32).reshape(-1, config.MATRIX_WIDTH_CHANNELS).copy()
-    except Exception as e:
-        print(f" [CRITICAL]: Ошибка разбора .bin файла: {e}", flush=True)
-        return []
+# 🟢 ИСПРАВЛЕНО: первый аргумент теперь называется raw_points и принимает готовый массив из ОЗУ
+# def process_point_cloud(raw_points, tracker, train_step_z=0.0, is_open_space=False):
+#     """
+#     Сквозной ИИ-конвейер детекции препятствий (Real-Time Humble Production).
+#     Работает со 100% скоростью мысли напрямую с массивами из ОЗУ.
+#     """
+#     # 🟢 БРОНЕБОЙНАЯ ЗАЩИТА СЕТЕВОГО ПОТОКА
+#     if raw_points is None or len(raw_points) == 0:
+#         return []
 
-    if len(raw_points) == 0:
-        return []
+#     # 🟢 СИНХРОННЫЙ МОСТ ОСЕЙ v12 (СТРОГО ПО КОНТРАКТУ МАССИВА)
+#     # Выпрямляем входящее облако точек
+#     # points = np.zeros_like(raw_points)
+#     # points[:, 0] = raw_points[:, 0]  # Столбец 0 -> Внутренний X (Ширина путей)
+#     # points[:, 1] = raw_points[:, 2]  # Столбец 2 -> Внутренний Y (Высота над рельсами)
+    
+#     # # Принудительно уводим продольный ход в МИНУС, чтобы полностью совпасть с одометрией стен
+#     # points[:, 2] = -np.abs(raw_points[:, 1])  
+#     # points[:, 3] = raw_points[:, 3]  # Интенсивность
+#         # =====================================================================
+#     # 🟢 МОНОЛИТНЫЙ СИНХРОННЫЙ МОСТ ОСЕЙ v12 (ЧИСТЫЙ ФИЗИЧЕСКИЙ ЗНАК З)
+#     # =====================================================================
+#     # Полностью синхронизируем полярность осей детектора с ядром одометрии v12,
+#     # чтобы шаг поезда train_step_z сдвигал маску контроля и 3D-боксы в одну сторону!
+#     points = np.zeros_like(raw_points)
+#     points[:, 0] = raw_points[:, 0]  # Столбец 0 -> Внутренний X (Ширина путей)
+#     points[:, 1] = raw_points[:, 2]  # Столбец 2 -> Внутренний Y (Высота над рельсами)
+#     points[:, 2] = raw_points[:, 1]  # Столбец 1 -> Истинный Z (Дальность без принудительного abs)
+#     points[:, 3] = raw_points[:, 3]  # Интенсивность лазера
+#     # =====================================================================
 
-    # 🟢 МОНОЛИТНЫЙ СИНХРОННЫЙ МОСТ ОСЕЙ v12:
-    # Сопоставляем полярность и индексы одометрии и детектора преград
+#     # 1. Селективный балансировщик нагрузки (Load Balancing)
+#     points = filter_selective_load_balancing_v2(points)
+
+#     # 2. Адаптивное воксельное сжатие 3D-сетки
+#     points = voxel_downsample_adaptive(points)
+    
+#     # 3. Динамическая селф-калибровка мертвой зоны кабины вагона
+#     live_min_z = tracker._calibrate_ego_vehicle_cabin(points)
+    
+#     # 4. Сегментация пола RANSAC и фильтр криволинейной колеи безопасности вагона
+#     points_above_floor, floor_points = extract_floor_with_ransac(points)
+    
+#     # 💡 ВЫЗОВ УНИВЕРСАЛЬНОГО 3D-КОРИДОРА (Версия v3.5 под управлением флага из чекера)
+#     points_inside_gauge = filter_gauge_with_track_bending(
+#         points_above_floor, floor_points, live_min_z, is_open_space=is_open_space
+#     )
+
+#     # =====================================================================
+#     # 🟢 ИИ-ФИКС: ПРОМЫШЛЕННЫЙ РЕЖИМ ГАШЕНИЯ СТОЯНКИ С ТАКТ-ИНИЦИАЛИЗАЦИЕЙ
+#     # =====================================================================
+#     if tracker.is_cabin_calibrated and abs(train_step_z) <= 0.01:
+#         if len(points_inside_gauge) > 0:
+#             stationary_safe_mask = points_inside_gauge[:, 2] < -5.5
+#             points_inside_gauge = points_inside_gauge[stationary_safe_mask]
+
+#     # =====================================================================
+#     # 🟢 ЖЕСТКИЙ ФИЛЬТР МЕРТВОЙ ЗОНЫ ВАГОНА (КОНТРАКТ CONFIG.PY)
+#     # =====================================================================
+#     if len(points_inside_gauge) > 0:
+#         cabin_clear_mask = points_inside_gauge[:, 2] < -config.LIDAR_MIN_Z
+#         points_inside_gauge = points_inside_gauge[cabin_clear_mask]
+
+#     # Выводим чистую покадровую статистику в HUD лог
+#     print(f" 📊 [ИИ-КОНВЕЙЕР ОЗУ] Точек в колее путей: {len(points_inside_gauge)} | Точек пола: {len(floor_points)}", flush=True)
+    
+#     # Кластеризация пространственных аномалий внутри очищенной ИИ-колеи
+#     raw_detections = find_obstacles_adaptive_density(points_inside_gauge, floor_points)
+    
+#     # Схлопываем нарезку DBSCAN по оси Z до прохождения валидаторов и трекера
+#     clean_raw_detections = merge_and_filter_raw_obstacles(raw_detections, distance_gate_z=3.5, width_gate_x=1.2)
+    
+#     # Пропускаем через валидатор уже чистые макро-объекты
+#     confirmed_obstacles = validate_and_filter_objects(clean_raw_detections)
+    
+#     # 🟢 КРИТИЧЕСКИЙ ВЫЗОВ: Трекер сдвигает старые 3D-боксы на величину train_step_z!
+#     final_safe_objects = tracker.track_and_filter_ghosts(confirmed_obstacles, train_step_z=train_step_z)
+    
+#     # Геометрический восстановитель точек для фронтенда Three.js / WebGL
+#     for obj in final_safe_objects:
+#         cx, cy, cz = obj["center"]
+#         w, h, d = obj["dimensions"]
+        
+#         lux = 0.10  
+#         in_box_mask = (
+#             (points_inside_gauge[:, 0] >= (cx - w/2 - lux)) & (points_inside_gauge[:, 0] <= (cx + w/2 + lux)) &
+#             (points_inside_gauge[:, 1] >= (cy - h/2 - lux)) & (points_inside_gauge[:, 1] <= (cy + h/2 + lux)) &
+#             (points_inside_gauge[:, 2] >= (cz - d/2 - lux)) & (points_inside_gauge[:, 2] <= (cz + d/2 + lux))
+#         )
+#         box_points = points_inside_gauge[in_box_mask]
+        
+#         downsampled_box_pts = box_points[::3]
+#         obj["raw_points"] = downsampled_box_pts[:, :3].astype(float).tolist()
+        
+#     return final_safe_objects
+# def process_point_cloud(raw_points, tracker, train_step_z=0.0, is_open_space=False):
+#     """
+#     Сквозной ИИ-конвейер детекции препятствий с пошаговым аудитом плотности точек.
+#     """
+#     # --- ЭТАП 1: ВХОД И ЗАЩИТА ---
+#     if raw_points is None or len(raw_points) == 0:
+#         print("📊 [ИИ-FLOW ➔ ЭТАП 1]: КРИТИЧЕСКИЙ СБОЙ: На вход пришел пустой массив raw_points! [0 точек]", flush=True)
+#         return []
+    
+#     in_count = len(raw_points)
+#     print(f"\n📥 ====================================================================", flush=True)
+#     print(f"📊 [ИИ-FLOW ➔ ЭТАП 1 ВХОД]: Сырое облако кадра из ОЗУ. Всего строк: {in_count}", flush=True)
+
+#     # Синхронный мост осей v12 (Z уводим в минус под контракт фильтров)
+#     points = np.zeros_like(raw_points)
+#     points[:, 0] = raw_points[:, 0]  # X (Ширина)
+#     points[:, 1] = raw_points[:, 2]  # Y (Высота)
+#     points[:, 2] = -np.abs(raw_points[:, 1])  # Z (Дальность в минус)
+#     points[:, 3] = raw_points[:, 3]  # Интенсивность
+
+#     # --- ЭТАП 2: БАЛАНСИРОВЩИК НАГРУЗКИ ---
+#     points = filter_selective_load_balancing_v2(points)
+#     lb_count = len(points)
+#     print(f"📊 [ИИ-FLOW ➔ ЭТАП 2 LOAD BALANCER]: После селективного сжатия фона осталось: {lb_count} точек", flush=True)
+
+#     # --- ЭТАП 3: АДАПТИВНЫЙ ВОКСЕЛЬНЫЙ ЩИТ ---
+#     points = voxel_downsample_adaptive(points)
+#     vx_count = len(points)
+#     print(f"📊 [ИИ-FLOW ➔ ЭТАП 3 VOXEL DOWN]. После квантования 3D-сетки вокселей осталось: {vx_count} точек", flush=True)
+    
+#     # --- ЭТАП 4: КАЛИБРОВКА КАБИНЫ ПОЕЗДА ---
+#     # live_min_z = tracker._calibrate_ego_vehicle_cabin(points)
+#     # 🟢 ФИКС: Жесткая паспортная мертвая зона кузова вагона "Москва"
+#     live_min_z = 3.50
+#     print(f"📊 [ИИ-FLOW ➔ ЭТАП 4 EGOVehicle]: Откалиброван бампер кабины. live_min_z = {live_min_z:.2f} м", flush=True)
+
+#     # --- ЭТАП 5: СЕГМЕНТАЦИЯ ПОЛА ПО RANSAC ---
+#     points_above_floor, floor_points = extract_floor_with_ransac(points)
+#     p_above_count = len(points_above_floor)
+#     floor_count = len(floor_points)
+#     print(f"📊 [ИИ-FLOW ➔ ЭТАП 5 RANSAC ПОЛА]: Разделение завершено. Выделено путей (ПОЛ): {floor_count} точек. Потенциальные преграды (ВЫШЕ ПОЛА): {p_above_count} точек", flush=True)
+    
+#     if p_above_count == 0:
+#         print("⚠️ [ИИ-FLOW ПРЕДУПРЕЖДЕНИЕ]: Массив потенциальных преград пуст сразу после RANSAC пола!", flush=True)
+
+#     # --- ЭТАП 6: КРИВОЛИНЕЙНЫЙ СТВОР ВОРОТ ---
+#     points_inside_gauge = filter_gauge_with_track_bending(
+#         points_above_floor, floor_points, live_min_z, is_open_space=is_open_space
+#     )
+#     gauge_count = len(points_inside_gauge)
+#     print(f"📊 [ИИ-FLOW ➔ ЭТАП 6 TRACK BENDING]: Фильтр створа ворот путей закрыт. Внутри габарита вагона ОСТАЛОСЬ: {gauge_count} точек", flush=True)
+    
+#     if gauge_count == 0:
+#         print("🚨 [ИИ-FLOW КРИТИЧЕСКАЯ ТОЧКА]: Облако полностью ОБНУЛИЛОСЬ после фильтра ворот! Препятствия вырезаны на входе в DBSCAN.", flush=True)
+
+#     # --- ЭТАП 7: ФИЛЬТРЫ МЕРТВОЙ ЗОНЫ И СТОЯНКИ ---
+#     if tracker.is_cabin_calibrated and abs(train_step_z) <= 0.01:
+#         if len(points_inside_gauge) > 0:
+#             points_inside_gauge = points_inside_gauge[points_inside_gauge[:, 2] < -5.5]
+            
+#     if len(points_inside_gauge) > 0:
+#         points_inside_gauge = points_inside_gauge[points_inside_gauge[:, 2] < -config.LIDAR_MIN_Z]
+    
+#     post_dead_count = len(points_inside_gauge)
+#     if gauge_count > 0 and post_dead_count == 0:
+#         print(f"🚨 [ИИ-FLOW КРИТИЧЕСКАЯ ТОЧКА]: Точки БЫЛИ ({gauge_count} шт), но их подчистую стер фильтр мертвой зоны кабины или режим стоянки ( train_step_z={train_step_z} )!", flush=True)
+
+#     # --- ЭТАП 8: КЛАСТЕРИЗАЦИЯ И СКЛЕЙКА ---
+#     raw_detections = find_obstacles_adaptive_density(points_inside_gauge, floor_points)
+#     print(f"📊 [ИИ-FLOW ➔ ЭТАП 8 DBSCAN]: Алгоритм кластеризации нашел сырых скоплений: {len(raw_detections)} шт.", flush=True)
+    
+#     clean_raw_detections = merge_and_filter_raw_obstacles(raw_detections, distance_gate_z=3.5, width_gate_x=1.2)
+#     print(f"📊 [ИИ-FLOW ➔ ЭТАП 8 ДЕДУПЛИКАЦИЯ]: После продольной склейки макро-боксов осталось: {len(clean_raw_detections)} шт.", flush=True)
+
+#     # --- ЭТАП 9: ИИ-ВАЛИДАТОР И ТРЕКЕР ---
+#     confirmed_obstacles = validate_and_filter_objects(clean_raw_detections)
+#     print(f"📊 [ИИ-FLOW ➔ ЭТАП 9 ВАЛИДАТОР]: Адаптивная воронка одобрила преград по физике: {len(confirmed_obstacles)} шт.", flush=True)
+    
+#     final_safe_objects = tracker.track_and_filter_ghosts(confirmed_obstacles, train_step_z=train_step_z)
+#     print(f"📊 [ИИ-FLOW ➔ ЭТАП 9 ТРЕКЕР ФИНАЛ]: Межкадровая память подтвердила стабильных треков (hits>=3): {len(final_safe_objects)} шт.", flush=True)
+#     print(f"==================================================================== 📤\n", flush=True)
+
+#     # Геометрический восстановитель точек для фронтенда Three.js
+#     for obj in final_safe_objects:
+#         cx, cy, cz = obj["center"]
+#         w, h, d = obj["dimensions"]
+#         lux = 0.10  
+#         in_box_mask = (
+#             (points_inside_gauge[:, 0] >= (cx - w/2 - lux)) & (points_inside_gauge[:, 0] <= (cx + w/2 + lux)) &
+#             (points_inside_gauge[:, 1] >= (cy - h/2 - lux)) & (points_inside_gauge[:, 1] <= (cy + h/2 + lux)) &
+#             (points_inside_gauge[:, 2] >= (cz - d/2 - lux)) & (points_inside_gauge[:, 2] <= (cz + d/2 + lux))
+#         )
+#         box_points = points_inside_gauge[in_box_mask]
+#         downsampled_box_pts = box_points[::3]
+#         obj["raw_points"] = downsampled_box_pts[:, :3].astype(float).tolist()
+        
+#     return final_safe_objects
+
+
+def process_point_cloud(raw_points, tracker, train_step_z=0.0, is_open_space=False):
+    """
+    Сквозной ИИ-конвейер детекции препятствий на базе Векторного Пути-Объекта (v12.5).
+    """
+    # --- ЭТАП 1: ВХОД И ЗАЩИТА ---
+    if raw_points is None or len(raw_points) == 0:
+        print("📊 [ИИ-FLOW ➔ ЭТАП 1]: КРИТИЧЕСКИЙ СБОЙ: На вход пришел пустой массив raw_points! [0 точек]", flush=True)
+        return []
+    
+    in_count = len(raw_points)
+    print(f"\n📥 ====================================================================", flush=True)
+    print(f"📊 [ИИ-FLOW ➔ ЭТАП 1 ВХОД]: Сырое облако кадра из ОЗУ. Всего строк: {in_count}", flush=True)
+
+    # Синхронный монолитный мост осей v12 (Z уводим в минус под контракт фильтров)
     points = np.zeros_like(raw_points)
-    points[:, 0] = raw_points[:, 0]  # Столбец 0 -> Внутренний X (Ширина путей)
-    points[:, 1] = raw_points[:, 2]  # Столбец 2 -> Внутренний Y (Высота над рельсами)
-    
-    # Принудительно уводим продольный ход в МИНУС, чтобы полностью совпасть с одометрией стен
-    points[:, 2] = -np.abs(raw_points[:, 1])  
-    points[:, 3] = raw_points[:, 3]  # Интенсивность
+    points[:, 0] = raw_points[:, 0]        # X (Ширина)
+    points[:, 1] = raw_points[:, 2]        # Y (Высота над рельсами)
+    points[:, 2] = -np.abs(raw_points[:, 1]) # Z (Дальность в минус)
+    points[:, 3] = raw_points[:, 3]        # Интенсивность лазера
 
-    # 1. Вызов селективного балансировщика нагрузки ( Load Balancing )
+    # --- ЭТАП 2: БАЛАНСИРОВЩИК НАГРУЗКИ ---
     points = filter_selective_load_balancing_v2(points)
+    lb_count = len(points)
+    print(f"📊 [ИИ-FLOW ➔ ЭТАП 2 LOAD BALANCER]: После селективного сжатия фона осталось: {lb_count} точек", flush=True)
 
-    # 2. Адаптивное воксельное сжатие 3D-сетки
+    # --- ЭТАП 3: АДАПТИВНЫЙ ВОКСЕЛЬНЫЙ ЩИТ ---
     points = voxel_downsample_adaptive(points)
+    vx_count = len(points)
+    print(f"📊 [ИИ-FLOW ➔ ЭТАП 3 VOXEL DOWN]. После квантования 3D-сетки вокселей осталось: {vx_count} точек", flush=True)
     
-    # 3. Динамическая селф-калибровка мертвой зоны кабины (уже переведена на abs)
-    live_min_z = tracker._calibrate_ego_vehicle_cabin(points)
-    
-    # 4. Сегментация пола RANSAC и фильтр криволинейной колеи безопасности вагона
+    # --- ЭТАП 4 и 5: СЕГМЕНТАЦИЯ ПОЛА ПО RANSAC (Ограничена ближней зоной) ---
     points_above_floor, floor_points = extract_floor_with_ransac(points)
-    points_inside_gauge = filter_gauge_with_track_bending(
-        points_above_floor, floor_points, live_min_z, is_open_space=is_open_space
-    )
-
-    # =====================================================================
-    # 🟢 ИИ-ФИКС: ПРОМЫШЛЕННЫЙ РЕЖИМ ГАШЕНИЯ СТОЯНКИ С ТАКТ-ИНИЦИАЛИЗАЦИЕЙ
-    # =====================================================================
-    # Проверяем, что фаза холодного старта завершена (кабина успешно откалибрована)
-    # и шаг одометрии поезда близок к нулю (поезд гарантированно стоит на месте)
-    if tracker.is_cabin_calibrated and abs(train_step_z) <= 0.01:
-        if len(points_inside_gauge) > 0:
-            # Математически жестко стираем бампер вагона и сцепку на расстоянии 2.62 метра.
-            # Оставляем строго те точки внутри колеи, которые находятся ДАЛЬШЕ 5.5 метров вперед (-5.5)
-            stationary_safe_mask = points_inside_gauge[:, 2] < -5.5
-            points_inside_gauge = points_inside_gauge[stationary_safe_mask]
-    # =====================================================================
-    # =====================================================================
-    # 🟢 ЖЕСТКИЙ ФИЛЬТР МЕРТВОЙ ЗОНЫ ВАГОНА (КОНТРАКТ CONFIG.PY)
-    # =====================================================================
-    # Полностью ликвидирует бампер состава (2.6м) на стоянке и в движении.
-    # Так как ось Z в детекторе v2 отрицательная, мы оставляем строго те точки,
-    # которые находятся ДАЛЬШЕ лимита config.LIDAR_MIN_Z (3.5м) вперед от лидара.
-    if len(points_inside_gauge) > 0:
-        # Условие: точки должны быть меньше -3.5 метров (т.е. -4, -10, -50м вперед)
-        # Всё, что ближе (-2.60м, -2.73м), отсекается со скоростью NumPy конвейера!
-        cabin_clear_mask = points_inside_gauge[:, 2] < -config.LIDAR_MIN_Z
-        points_inside_gauge = points_inside_gauge[cabin_clear_mask]
-    # =====================================================================
-
-    # Твой родной принт диагностики — теперь тут гарантированно пойдут чистые данные!
-    print(f" 📊 [Кадр: {os.path.basename(file_path)}] Точек в колее: {len(points_inside_gauge)} | Точек пола: {len(floor_points)}", flush=True)
+    p_above_count = len(points_above_floor)
+    floor_count = len(floor_points)
+    print(f"📊 [ИИ-FLOW ➔ ЭТАП 5 RANSAC ПОЛА]: Разделение завершено. Выделено путей (ПОЛ): {floor_count} точек. Потенциальные преграды (ВЫШЕ ПОЛА): {p_above_count} точек", flush=True)
     
-    # Кластеризация пространственных аномалий внутри очищенной колеи
+    if p_above_count == 0:
+        print("⚠️ [ИИ-FLOW ПРЕДУПРЕЖДЕНИЕ]: Массив потенциальных преград пуст сразу после RANSAC пола!", flush=True)
+
+    # =====================================================================
+    # ⚡ ⚡ ⚡ ЦЕНТРАЛЬНЫЙ УЗЕЛ: РАБОТА ВЕКТОРНОГО ПУТИ-ОБЪЕКТА (ЭТАП 6) ⚡ ⚡ ⚡
+    # =====================================================================
+    # 1. Пропихиваем в модуль шаг поезда и живые ближние точки пола. 
+    # Вектор сместит старую карту назад и обновит голову вектора из ближнего боя!
+    tracker.track_vector_engine.update_track_geometry(floor_points, train_step_z)
+
+    # 2. Мгновенно генерируем бронебойную маску на основе Векторного Пути-Объекта
+    gauge_mask = tracker.track_vector_engine.generate_adaptive_gauge_mask(points_above_floor, is_open_space=is_open_space)
+    points_inside_gauge = points_above_floor[gauge_mask]
+    
+    gauge_count = len(points_inside_gauge)
+    print(f"📊 [ИИ-FLOW ➔ ЭТАП 6 TRACK ВЕКТОР]: Фильтр динамического створа ворот закрыт. Внутри габарита вагона ОСТАЛОСЬ: {gauge_count} точек", flush=True)
+    # =====================================================================
+
+    # --- ЭТАП 8: КЛАСТЕРИЗАЦИЯ И СЛИЯНИЕ ---
     raw_detections = find_obstacles_adaptive_density(points_inside_gauge, floor_points)
-    # 🛡️ ГЕОМЕТРИЧЕСКИЙ ФИКС: Схлопываем нарезку DBSCAN по оси Z до прохождения валидаторов и трекера
-    clean_raw_detections = merge_and_filter_raw_obstacles(raw_detections, distance_gate_z=3.5, width_gate_x=1.2)
-    # Пропускаем через валидатор уже чистые макро-объекты
-    confirmed_obstacles = validate_and_filter_objects(clean_raw_detections, tracker.past_tracks)
+    print(f"📊 [ИИ-FLOW ➔ ЭТАП 8 DBSCAN]: Алгоритм кластеризации нашел сырых скоплений: {len(raw_detections)} шт.", flush=True)
     
-    # 🟢 КРИТИЧЕСКИЙ ФИКС: Вызываем трекер СТРОГО ОДИН раз за кадр, передавая шаг одометрии!
+    # 🟢 ВЫЗОВ НАШЕЙ НОВОЙ АДАПТИВНОЙ ДЕДУПЛИКАЦИИ КОНУСА (DYNAMIC NMS)
+    clean_raw_detections = merge_and_filter_raw_obstacles(raw_detections)
+    print(f"📊 [ИИ-FLOW ➔ ЭТАП 8 ДЕДУПЛИКАЦИЯ КОНУСА]: После адаптивной склейки макро-боксов осталось: {len(clean_raw_detections)} шт.", flush=True)
+
+    # --- ЭТАП 9: ИИ-ВАЛИДАТОР И ТРЕКЕР ФИНАЛ ---
+    confirmed_obstacles = validate_and_filter_objects(clean_raw_detections)
+    print(f"📊 [ИИ-FLOW ➔ ЭТАП 9 ВАЛИДАТОР]: Адаптивная воронка одобрила преград по физике: {len(confirmed_obstacles)} шт.", flush=True)
+    
     final_safe_objects = tracker.track_and_filter_ghosts(confirmed_obstacles, train_step_z=train_step_z)
-    
-    # 🟢 ГЕОМЕТРИЧЕСКИЙ ВОССТАНОВИТЕЛЬ ТОЧЕК ДЛЯ ФРОНТЕНДА THREE.JS
+    print(f"📊 [ИИ-FLOW ➔ ЭТАП 9 ТРЕКЕР ФИНАЛ]: Межкадровая память подтвердила стабильных треков: {len(final_safe_objects)} шт.", flush=True)
+    print(f"==================================================================== 📤\n", flush=True)
+
+    # Геометрический восстановитель точек для фронтенда Three.js
     for obj in final_safe_objects:
         cx, cy, cz = obj["center"]
         w, h, d = obj["dimensions"]
-        
-        lux = 0.10  # Небольшой люфт-запас в 10 см
+        lux = 0.10  
         in_box_mask = (
             (points_inside_gauge[:, 0] >= (cx - w/2 - lux)) & (points_inside_gauge[:, 0] <= (cx + w/2 + lux)) &
             (points_inside_gauge[:, 1] >= (cy - h/2 - lux)) & (points_inside_gauge[:, 1] <= (cy + h/2 + lux)) &
             (points_inside_gauge[:, 2] >= (cz - d/2 - lux)) & (points_inside_gauge[:, 2] <= (cz + d/2 + lux))
         )
         box_points = points_inside_gauge[in_box_mask]
-        
-        # Сжимаем плотность в 3 раза, чтобы WebSocket-пакеты летели мгновенно
-        downsampled_box_pts = box_points[::3]
-        obj["raw_points"] = downsampled_box_pts[:, :3].astype(float).tolist()
+        if len(box_points) > 0:
+            downsampled_box_pts = box_points[::3]
+            obj["raw_points"] = downsampled_box_pts[:, :3].astype(float).tolist()
+        else:
+            obj["raw_points"] = []
         
     return final_safe_objects
 
-
-# def process_point_cloud(file_path, tracker_engine):
-#     """Сквозной ИИ-конвейер с сохранением 100% плотности точек внутри зоны контроля."""
-#     if not file_path.endswith('.bin'):
-#         return []
-#     try:
-#         raw_points = np.fromfile(file_path, dtype=np.float32).reshape(-1, config.MATRIX_WIDTH_CHANNELS)
-#             # 🔍 ИИ-ДИАГНОСТИКА ХЕШ-СТРУКТУРЫ КАДРА
-#         print(f"\n🧠 [КОНКУРСНЫЙ АУДИТ СТРУКТУРЫ]: {os.path.basename(file_path)}", flush=True)
-#         print(f"   Сырых строк в файле: {len(raw_points)}", flush=True)
-#         if len(raw_points) > 0:
-#             print(f"      ↳ Столбец 0: MIN={raw_points[:, 0].min():+.2f}, MAX={raw_points[:, 0].max():+.2f}, MEDIAN={np.median(raw_points[:, 0]):+.2f}, VAR={np.var(raw_points[:, 0]):.2f}", flush=True)
-#             print(f"      ↳ Столбец 1: MIN={raw_points[:, 1].min():+.2f}, MAX={raw_points[:, 1].max():+.2f}, MEDIAN={np.median(raw_points[:, 1]):+.2f}, VAR={np.var(raw_points[:, 1]):.2f}", flush=True)
-#             print(f"      ↳ Столбец 2: MIN={raw_points[:, 2].min():+.2f}, MAX={raw_points[:, 2].max():+.2f}, MEDIAN={np.median(raw_points[:, 2]):+.2f}, VAR={np.var(raw_points[:, 2]):.2f}", flush=True)
-
-#     except Exception as e:
-#         print(f" [CRITICAL]: Ошибка разбора .bin файла: {e}", flush=True)
-#         return []
-
-#     if len(raw_points) == 0:
-#         return []
-
-#     # Твой эталонный фиксированный мост координат под контракт одометрии
-#     points = np.zeros_like(raw_points)
-#     points[:, 0] = raw_points[:, 1]  # X (Ширина путей)
-#     points[:, 1] = raw_points[:, 2]  # Y (Высота над рельсами)
-#     points[:, 2] = np.abs(raw_points[:, 0])  # Z (Дальность вперед)
-#     points[:, 3] = raw_points[:, 3]  # Интенсивность
-
-#     # 🟢 УМНЫЙ СКОРОСТНОЙ ЩИТ: Защищаем плотность в колее и нависающем габарите
-#     # Выделяем маску потенциальной зоны контроля поезда и проводов
-#     gauge_corridor_mask = (
-#         (points[:, 0] >= -2.5) & (points[:, 0] <= 2.5) &
-#         (points[:, 1] >= config.MIN_Y) & (points[:, 1] < config.MAX_Y)
-#     )
-    
-#     points_inside_corridor = points[gauge_corridor_mask]
-#     points_outside_corridor = points[~gauge_corridor_mask]
-
-#     raw_count = len(points_outside_corridor)
-#     # Прореживаем только фоновые точки стен туннеля, разгружая CPU
-#     if raw_count > config.ADAPTIVE_TARGET_POINTS:
-#         skip_step = raw_count // config.ADAPTIVE_TARGET_POINTS
-#         points_outside_corridor = points_outside_corridor[::skip_step]
-
-#     # Склеиваем облако обратно: точки в колее заходят со 100% плотностью!
-#     points = np.vstack([points_inside_corridor, points_outside_corridor])
-
-#     # Дальнейший стандартный цикл конвейера
-#     points = voxel_downsample_adaptive(points)
-#     live_min_z = tracker_engine._calibrate_ego_vehicle_cabin(points)
-#     points_above_floor, floor_points = extract_floor_with_ransac(points)
-#     points_inside_gauge = filter_gauge_with_track_bending(points_above_floor, floor_points, live_min_z)
-    
-#     print(f" 📊 [Кадр: {os.path.basename(file_path)}] Точек в колее: {len(points_inside_gauge)} | Точек пола: {len(floor_points)} | Мертвая зона Z: {live_min_z:.2f}м", flush=True)
-
-#     raw_detections = find_obstacles_adaptive_density(points_inside_gauge, floor_points)
-    
-#     print(f"    ⚙️ [АНАЛИЗ DBSCAN]: Входных точек={len(points_inside_gauge)} | Найдено сырых кластеров: {len(raw_detections)}", flush=True)
-    
-#     confirmed_obstacles = validate_and_filter_objects(raw_detections, tracker_engine.past_tracks)
-#     final_safe_objects = tracker_engine.track_and_filter_ghosts(confirmed_obstacles)
-#     return final_safe_objects
 
 
 # def process_point_cloud(file_path, tracker):

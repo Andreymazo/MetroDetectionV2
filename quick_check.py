@@ -71,10 +71,38 @@ def main():
         frame_idx = frame_files.index(frame_name)
 
         # Вычисляем сдвиг кадра по одометрии
-        shift_z_physical, _ = odometry.update_odometry_fusion(file_path, frame_idx, dt=0.1)
+        # 🟢 ИСПРАВЛЕНО: сначала читаем бинарное облако точек лидара из файла в массив numpy
+        raw_points_array = np.fromfile(file_path, dtype=np.float32).reshape(-1, 4)
 
+        # Вычисляем сдвиг кадра по одометрии
+        shift_z_physical, _ = odometry.update_odometry_fusion(raw_points_array, frame_idx, dt=0.1)
+        
+        # =====================================================================
+        # 🛰️ [ДИНАМИЧЕСКИЙ АНАЛИЗАТОР ПРОСТРАНСТВА НА ЛЕТУ]
+        # =====================================================================
+        # Извлекаем координаты X (Ширина) и Y (Высота) для анализа геометрии
+        x_check = raw_points_array[:, 0]
+        y_check = raw_points_array[:, 2] # Нативные оси: столбец 2 — высота над рельсами
+        
+        # Выделяем срез точек строго на уровне окон и крыши поезда (Y от -0.5м до 1.5м),
+        # чтобы стены платформы не путались с полом или потолком.
+        side_walls_mask = (y_check >= -0.5) & (y_check <= 1.5) & (np.abs(raw_points_array[:, 1]) < 25.0)
+        
+        if np.sum(side_walls_mask) > 100:
+            # Находим 98-й процентиль ширины боковых точек
+            max_wall_width = np.percentile(np.abs(x_check[side_walls_mask]), 98)
+            # Если боковые ориентиры раздвинулись шире 3.2 метров — мы на станции/платформе
+            is_open_space_computed = bool(max_wall_width > 3.2)
+        else:
+            is_open_space_computed = False
+            
+        if is_open_space_computed:
+            print(f" 📡 [АУДИТ ПРОСТРАНСТВА]: Кадр {frame_name} ➔ Впереди ПЛАТФОРМА / СТАНЦИЯ (is_open_space=True)", flush=True)
+        # =====================================================================
+
+        # 🟢 Передаем динамически вычисленный флаг вместо старого False
         # Вызываем пайплайн детекции v2 с передачей трекера
-        detected_obstacles = process_point_cloud(file_path, tracker=tracker, train_step_z=shift_z_physical, is_open_space=False)
+        detected_obstacles = process_point_cloud(raw_points_array, tracker=tracker, train_step_z=shift_z_physical, is_open_space=is_open_space_computed)
         
         if len(detected_obstacles) > 0:
             total_detections_count += len(detected_obstacles)
@@ -138,7 +166,13 @@ def main():
     print("-" * 70)
     print("📋 СПИСОК ФИЗИЧЕСКИХ ЦЕЛЕЙ (СОПРОВОЖДЕНИЕ ТРЕКЕРА):")
     for t_id, data in unique_obstacles_registry.items():
-        print(f"  🆔 Объект #{t_id:<4} | Впервые замечен: {data['first_seen_frame']} | Мин. дистанция: {data['min_distance_m']:.2f} м | Тип: {data['shape']}")
+        # Защита от None: если в данных пусто, подставляем безопасные значения
+        fs_frame = data.get('first_seen_frame') if data.get('first_seen_frame') is not None else "unknown"
+        min_dist = data.get('min_distance_m') if data.get('min_distance_m') is not None else 0.0
+        shape_text = data.get('shape') if data.get('shape') is not None else "Объемный объект"
+        
+        print(f"  🆔 Объект #{str(t_id):<4} | Впервые замечен: {fs_frame} | Мин. дистанция: {min_dist:.2f} м | Тип: {shape_text}")
+
     print("=" * 70 + "\n")
 
 if __name__ == "__main__":

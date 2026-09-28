@@ -132,19 +132,42 @@ docker run -d --network=host --ipc=host --name metro_live_container -v $(pwd):/a
 docker exec -it metro_live_container bash
 ```
 
-Запуск ИИ-ядра (для смены режима на отложенный батчинг замените скрипт на `lidar_detector_node_waits.py`):
-```bash
-export FASTRTPS_DEFAULT_PROFILES_FILE=/app/fastdds_config.xml
-source /opt/ros/humble/setup.bash
-python3 /app/metro_lidar/lidar_detector_node.py --ros-args -p use_sim_time:=false
-```
-*Нода инициализируется, подпишется на топик жюри `/sensing/lidar/hesai128/pointcloud` и уйдет в режим ожидания [4].*
+🚀 **УНИВЕРСАЛЬНЫЙ АВТОНОМНЫЙ ЗАПУСК ИИ-ЯДРА (С АДАПТАЦИЕЙ ПОД ЛЮБУЮ БАЗУ):**
+
+Система снабжена интеллектуальным инспектором путей и динамическим реконфигуратором подписок. Чтобы нода корректно считала `metadata.yaml` конкретной сессии и автоматически перенастроила радиоканал на нужный топик лидара (без риска «ослепнуть» из-за разницы в именах `/lidar_points` или `/sensing/lidar/...`), запускайте узел с явным указанием целевого сценария жюри:
+
+*   **Для тестирования сценария платформы (Platform):**
+    ```bash
+    export FASTRTPS_DEFAULT_PROFILES_FILE=/app/fastdds_config.xml
+    source /opt/ros/humble/setup.bash
+    python3 /app/metro_lidar/lidar_detector_node.py --ros-args -p use_sim_time:=false -p scenario:="doubleT_platform"
+    ```
+    *Инспектор путей обнаружит манифест, ИИ-парсер мгновенно выделит топик `/lidar_points` и откроет сетевую подписку.*
+
+*   **Для тестирования сценария с препятствиями (Obstacle):**
+    ```bash
+    export FASTRTPS_DEFAULT_PROFILES_FILE=/app/fastdds_config.xml
+    source /opt/ros/humble/setup.bash
+    python3 /app/metro_lidar/lidar_detector_node.py --ros-args -p use_sim_time:=false -p scenario:="doubleT_obstacle"
+    ```
+    *Нода автоматически перестроится на параллельный каталог, извлечет топик `/sensing/lidar/hesai128/pointcloud` и переключит на него конвейер обработки.*
+
+> 💡 **Бизнес-преимущество (Dynamic Parameter Callback):** Если нода уже запущена в терминале, переключать сценарии можно «на лету» без перезапуска самого Python-процесса. Судейский скрипт может отправить команду реконфигурации из соседней консоли:
+> `ros2 param set /subway_vision_core_node scenario "doubleT_obstacle"`
+> Встроенный в ядро механизм перехватит событие, атомарно уничтожит старый сетевой дескриптор, перечитает новый YAML-манифест и мгновенно откроет подписку на актуальный топик.
 
 #### 🎛️ ТЕРМИНАЛ №2: Запуск воспроизведения bag-файла
 
 Вход во второе окно запущенного контейнера со стороны хост-машины:
 ```bash
 docker exec -it metro_live_container bash
+```
+
+Запуск соответствующего оригинального bag-файла Мосметро (строго в соответствии с выбранным в Терминале №1 сценарием):
+```bash
+export FASTRTPS_DEFAULT_PROFILES_FILE=/app/fastdds_config.xml
+source /opt/ros/humble/setup.bash
+ros2 bag play /app/for_hackathon/doubleT_obstacle/
 ```
 
 Запуск оригинального bag-файла Мосметро:

@@ -146,7 +146,7 @@ def compute_weighted_median(shifts, weights):
 class StableLidarOdometryV12:
     """Промышленный движок трекинга опорных элементов ячеек (ЭЯ) стен туннеля."""
     
-    def __init__(self, is_stabilizer=False):
+    def __init__(self):
         # Телеметрия и память ЦОС стен
         self.prev_velocity_kmh = 0.0
         self.prev_acceleration = 0.0
@@ -159,305 +159,86 @@ class StableLidarOdometryV12:
         self.rail_raw_anchor = None       # Хранилище сырого опорного PCD путей
         self.rail_ttl = 0                 # Таймер удержания (6 кадров)
         self.rail_accum_z_predicted = 0.0 # Инерциальный накопитель сдвига внутри петли
-        # 🟢 АРХИТЕКТУРНЫЙ МАРКЕР ПАРАЛЛЕЛЬНОГО ДВОЙНИКА
-        self.is_stabilizer = is_stabilizer
-        if not is_stabilizer:
-            self.stabilizer_engine = None  # Инициализируется на такте сброса
-            self.stabilizer_age = 0
 
-    # def update_odometry_fusion(self, file_path, idx, dt=0.1):
-    #     """
-    #     Единая точка сборки одометрии v12. 
-    #     Инкапсулирует весь конвейер [Рельсы + Стены + ИИ-Шлюз] внутри ядра.
-    #     Возвращает: (итоговый_сдвиг_z, rail_passport)
-    #     """
-    #     # 🔍 ВЫВОДИМ ВХОДНЫЕ ПАРАМЕТРЫ ТАКТА В API:
-    #     if idx <= 2:
-    #         print(f"🔍 [ВХОД В ЯДРО]: Кадр idx={idx} | Текущая prev_velocity_kmh в памяти: {self.prev_velocity_kmh} км/ч", flush=True)
-            
-    #     if not os.path.exists(file_path):
-    #         return 0.0, None
-    #     # =====================================================================
-    #     # 🚀 [ИИ-ПЕРЕХВАТ ХОЛОДНОГО СТАРТА V12] 🚀
-    #     # =====================================================================
-    #     # Если это самый первый кадр сессии, мы находимся в полной слепоте.
-    #     # Вызываем внешнюю боевую функцию, передавая ей путь к папке сценария.
-    #             # === ВНУТРИ update_odometry_fusion (idx == 0) ===
-    #     if idx == 0 and self.prev_velocity_kmh == 0.0:
-    #         try:
-    #             scene_dir = os.path.dirname(file_path)
-    #             start_speed_kmh = calculate_initial_velocity_voxels(scene_dir)
-                
-    #             # 🔍 ДОБАВЛЯЕМ ЭТОТ ПРИНТ ДЛЯ ПРОВЕРКИ ВЫХОДА ИЗ ФУНКЦИИ:
-    #             print(f"\n🔍 [СТАРТЕР ПРОВЕРКА 1]: Функция calculate_initial_velocity_voxels вернула: {start_speed_kmh} км/ч\n", flush=True)
-                
-    #             if start_speed_kmh > 1.0:
-    #                 self.prev_velocity_kmh = start_speed_kmh
-    #         except Exception as e:
-    #             print(f"   ⚠️ Ошибка холодного старта: {e}", flush=True)
-
-
-    #     # Читаем сырые точки один раз за такт
-    #     raw_points = np.fromfile(file_path, dtype=np.float32).reshape(-1, 4)
-        
-    #     # 1. Расчет количества точек в колее рельс для ИИ-шлюза доверия
-    #     x_pts, y_pts, z_pts = raw_points[:, 2], raw_points[:, 0], raw_points[:, 1]
-    #     rail_points_mask = (z_pts >= -63.5) & (z_pts <= -3.5) & \
-    #                        (x_pts >= -0.75) & (x_pts <= 0.75) & \
-    #                        (y_pts >= -1.85) & (y_pts <= -1.05)
-    #     current_rail_points_count = int(np.sum(rail_points_mask))
-
-    #     # 2. Вызываем рельсовый одометр (ОЯР)
-    #     shift_z_rails, rail_passport = self.compute_raw_rail_odo_shift(raw_points, dt)
-
-    #     # 3. Вызываем одометр стен туннеля (ЭЯ)
-    #     macro_cloud = self.extract_clean_macro_tunnel(file_path)
-    #     if macro_cloud is not None:
-    #         passports = self.build_passports_via_dbscan(macro_cloud)
-    #         calculate_speed_trigger = bool(idx > 0)
-    #         shift_z_walls, matches_count, _ = self.associate_and_calculate_shift(passports, dt, calculate_speed=calculate_speed_trigger, idx=idx)
-
-    #     else:
-    #         shift_z_walls, matches_count = 0.0, 0
-
-    #             # =====================================================================
-    #     # 4. МАТЕМАТИЧЕСКОЕ СЛИЯНИЕ СКОРОСТЕЙ И ФИЛЬТРАЦИЯ СПАЙКОВ
-    #     # =====================================================================
-    #     if idx > 0:
-    #         # Жестко берем модули сдвигов датчиков, чтобы убрать конфликт знаков!
-    #         safe_rails = np.abs(shift_z_rails) if shift_z_rails is not None else 0.0
-    #         safe_walls = np.abs(shift_z_walls) if shift_z_walls is not None else 0.0
-            
-    #         final_shift_z = calculate_adaptive_fusion_shift(
-    #             safe_rails, safe_walls, self.prev_velocity_kmh, current_rail_points_count, idx, dt
-    #         )
-            
-    #         calculated_speed_kmh = (float(final_shift_z) / dt) * 3.6
-    #         if calculated_speed_kmh < 0.2:
-    #             calculated_speed_kmh = 0.0
-                
-    #         self.prev_velocity_kmh = calculated_speed_kmh
-    #     else:
-    #         # На кадре 0 ИИ-пускач уже прописал скорость, ход равен 0
-    #         final_shift_z = 0.0
-
-    #     # 🟢 ВЕРНЫЙ ВЫХОД: Строка ретерна стоит НА ОДНОМ УРОВНЕ с if/else!
-    #     # Функция ГАРАНТИРОВАННО вернет кортеж (0.0, rail_passport) на кадре 0!
-    #     return float(final_shift_z), rail_passport
-    
-    def update_odometry_fusion(self, raw_points, idx, dt=0.1):
+    def update_odometry_fusion(self, file_path, idx, dt=0.1):
         """
         Единая точка сборки одометрии v12. 
-        Инкапсулирует двухконтурный параллельный контур (Текущий + Стабилизирующий)
-        с прецизионной распаковкой кортежей ICP-вычислений.
+        Инкапсулирует весь конвейер [Рельсы + Стены + ИИ-Шлюз] внутри ядра.
+        Возвращает: (итоговый_сдвиг_z, rail_passport)
         """
-        # --- ФАЗА ВЫЧИСЛЕНИЙ ДЛЯ ИЗОЛИРОВАННОГО ПЕСОЧНОГО СТАБИЛИЗАТОРА (КОНТУР Б) ---
-        if self.is_stabilizer:
-            x_pts, y_pts, z_pts = raw_points[:, 2], raw_points[:, 0], raw_points[:, 1]
-            rail_points_mask = (z_pts >= -63.5) & (z_pts <= -3.5) & \
-                               (x_pts >= -0.75) & (x_pts <= 0.75) & \
-                               (y_pts >= -1.85) & (y_pts <= -1.05)
-            current_rail_points_count = int(np.sum(rail_points_mask))
-
-            shift_z_rails, rail_passport = self.compute_raw_rail_odo_shift(raw_points, dt)
+        # 🔍 ВЫВОДИМ ВХОДНЫЕ ПАРАМЕТРЫ ТАКТА В API:
+        if idx <= 2:
+            print(f"🔍 [ВХОД В ЯДРО]: Кадр idx={idx} | Текущая prev_velocity_kmh в памяти: {self.prev_velocity_kmh} км/ч", flush=True)
             
-            macro_cloud = self.extract_clean_macro_tunnel_from_memory(raw_points)
-            if macro_cloud is not None:
-                passports = self.build_passports_via_dbscan(macro_cloud)
-                calculate_speed_trigger = bool(idx > 0)
-                res_walls = self.associate_and_calculate_shift(passports, dt, calculate_speed=calculate_speed_trigger, idx=idx)
+        if not os.path.exists(file_path):
+            return 0.0, None
+        # =====================================================================
+        # 🚀 [ИИ-ПЕРЕХВАТ ХОЛОДНОГО СТАРТА V12] 🚀
+        # =====================================================================
+        # Если это самый первый кадр сессии, мы находимся в полной слепоте.
+        # Вызываем внешнюю боевую функцию, передавая ей путь к папке сценария.
+                # === ВНУТРИ update_odometry_fusion (idx == 0) ===
+        if idx == 0 and self.prev_velocity_kmh == 0.0:
+            try:
+                scene_dir = os.path.dirname(file_path)
+                start_speed_kmh = calculate_initial_velocity_voxels(scene_dir)
                 
-                # 🟢 ХИРУРГИЧЕСКИЙ ФИКС 1: Вытаскиваем строго индекс 0 из кортежа одометрии стен
-                if isinstance(res_walls, (tuple, list)) and len(res_walls) > 0:
-                    shift_z_walls = float(res_walls[0])
-                else:
-                    shift_z_walls = float(res_walls) if res_walls is not None else 0.0
-            else:
-                shift_z_walls = 0.0
-
-            if idx > 0:
-                final_shift_z = calculate_adaptive_fusion_shift(
-                    np.abs(shift_z_rails) if shift_z_rails is not None else 0.0, 
-                    np.abs(shift_z_walls), self.prev_velocity_kmh, current_rail_points_count, idx, dt
-                )
-            else:
-                final_shift_z = 0.0
+                # 🔍 ДОБАВЛЯЕМ ЭТОТ ПРИНТ ДЛЯ ПРОВЕРКИ ВЫХОДА ИЗ ФУНКЦИИ:
+                print(f"\n🔍 [СТАРТЕР ПРОВЕРКА 1]: Функция calculate_initial_velocity_voxels вернула: {start_speed_kmh} км/ч\n", flush=True)
                 
-            if isinstance(final_shift_z, (tuple, list, np.ndarray)):
-                final_shift_z = float(final_shift_z[0]) if len(final_shift_z) > 0 else 0.0
-            else:
-                final_shift_z = float(final_shift_z)
-
-            # 🟢 ИСПРАВЛЕНО: Расчёт и сохранение собственной скорости Стабилизатора
-            if idx > 0:
-                # Переводим локальный сдвиг такта в км/ч
-                self.prev_velocity_kmh = (final_shift_z / dt) * 3.6
-                if self.prev_velocity_kmh < 0.2:
-                    self.prev_velocity_kmh = 0.0
-            else:
-                # На кадре 0 сдвига ещё нет, скорость остаётся дефолтной или с пускового вокселя
-                pass
-
-            # 🟢 ДИАГНОСТИЧЕСКИЙ ПРИНТ ДЛЯ АУДИТА СКОРОСТИ СТАБИЛИЗАТОРА
-            print(f"   📊 [КОНТУР Б ПАМЯТЬ]: Шаг {final_shift_z*100:.2f} см ➔ Скорость Стабилизатора успешно обновлена: {self.prev_velocity_kmh:.2f} км/ч", flush=True)
-                
-            return float(final_shift_z), rail_passport
+                if start_speed_kmh > 1.0:
+                    self.prev_velocity_kmh = start_speed_kmh
+            except Exception as e:
+                print(f"   ⚠️ Ошибка холодного старта: {e}", flush=True)
 
 
-        # === ⚔️ ФАЗА АРБИТРАЖА ДЛЯ ТЕКУЩЕГО (ОСНОВНОГО) КОНТУРА А ===
-        self.stabilizer_age += 1
+        # Читаем сырые точки один раз за такт
+        raw_points = np.fromfile(file_path, dtype=np.float32).reshape(-1, 4)
         
-        if self.stabilizer_age % 20 == 0 or self.stabilizer_engine is None:
-            self.stabilizer_engine = StableLidarOdometryV12(is_stabilizer=True)
-            local_stab_idx = 0
-        else:
-            local_stab_idx = self.stabilizer_age % 20
-
-        # Расчет плотности рельсового полотна для Текущего контура
+        # 1. Расчет количества точек в колее рельс для ИИ-шлюза доверия
         x_pts, y_pts, z_pts = raw_points[:, 2], raw_points[:, 0], raw_points[:, 1]
         rail_points_mask = (z_pts >= -63.5) & (z_pts <= -3.5) & \
                            (x_pts >= -0.75) & (x_pts <= 0.75) & \
                            (y_pts >= -1.85) & (y_pts <= -1.05)
         current_rail_points_count = int(np.sum(rail_points_mask))
 
-        # --- РАСЧЕТ КОНТУРА А (ТЕКУЩИЙ) ---
-        shift_z_rails_main, rail_passport_main = self.compute_raw_rail_odo_shift(raw_points, dt)
-        macro_cloud_main = self.extract_clean_macro_tunnel_from_memory(raw_points)
-        if macro_cloud_main is not None:
-            passports_main = self.build_passports_via_dbscan(macro_cloud_main)
-            calculate_speed_trigger_main = bool(idx > 0)
-            res_walls_main = self.associate_and_calculate_shift(
-                passports_main, dt, calculate_speed=calculate_speed_trigger_main, idx=idx
-            )
-            
-            # 🟢 ХИРУРГИЧЕСКИЙ ФИКС 2: Вытаскиваем строго индекс 0 из основного кортежа стен
-            if isinstance(res_walls_main, (tuple, list)) and len(res_walls_main) > 0:
-                shift_z_walls_main = float(res_walls_main[0])
-            else:
-                shift_z_walls_main = float(res_walls_main) if res_walls_main is not None else 0.0
+        # 2. Вызываем рельсовый одометр (ОЯР)
+        shift_z_rails, rail_passport = self.compute_raw_rail_odo_shift(raw_points, dt)
+
+        # 3. Вызываем одометр стен туннеля (ЭЯ)
+        macro_cloud = self.extract_clean_macro_tunnel(file_path)
+        if macro_cloud is not None:
+            passports = self.build_passports_via_dbscan(macro_cloud)
+            calculate_speed_trigger = bool(idx > 0)
+            shift_z_walls, matches_count, _ = self.associate_and_calculate_shift(passports, dt, calculate_speed=calculate_speed_trigger, idx=idx)
+
         else:
-            shift_z_walls_main = 0.0
+            shift_z_walls, matches_count = 0.0, 0
 
-        # --- БЕЗОПАСНАЯ КИНЕМАТИКА КОНТУРА А (ОСНОВНОЙ) ---
-        shift_z_physical_main = calculate_adaptive_fusion_shift(
-            np.abs(shift_z_rails_main) if shift_z_rails_main is not None else 0.0, 
-            np.abs(shift_z_walls_main), self.prev_velocity_kmh, current_rail_points_count, idx, dt
-        )
-        
-        if isinstance(shift_z_physical_main, (tuple, list, np.ndarray)):
-            shift_z_physical_main = float(shift_z_physical_main[0]) if len(shift_z_physical_main) > 0 else 0.0
+                # =====================================================================
+        # 4. МАТЕМАТИЧЕСКОЕ СЛИЯНИЕ СКОРОСТЕЙ И ФИЛЬТРАЦИЯ СПАЙКОВ
+        # =====================================================================
+        if idx > 0:
+            # Жестко берем модули сдвигов датчиков, чтобы убрать конфликт знаков!
+            safe_rails = np.abs(shift_z_rails) if shift_z_rails is not None else 0.0
+            safe_walls = np.abs(shift_z_walls) if shift_z_walls is not None else 0.0
+            
+            final_shift_z = calculate_adaptive_fusion_shift(
+                safe_rails, safe_walls, self.prev_velocity_kmh, current_rail_points_count, idx, dt
+            )
+            
+            calculated_speed_kmh = (float(final_shift_z) / dt) * 3.6
+            if calculated_speed_kmh < 0.2:
+                calculated_speed_kmh = 0.0
+                
+            self.prev_velocity_kmh = calculated_speed_kmh
         else:
-            shift_z_physical_main = float(shift_z_physical_main)
+            # На кадре 0 ИИ-пускач уже прописал скорость, ход равен 0
+            final_shift_z = 0.0
 
-        # 🟢 ИСПРАВЛЕНО: берем модуль от шага, чтобы инверсия осей стен не превращала скорость в отрицательную!
-        calculated_speed_kmh_main = (np.abs(shift_z_physical_main) / dt) * 3.6
-
-        if calculated_speed_kmh_main < 0.2:
-            calculated_speed_kmh_main = 0.0
-            shift_z_physical_main = 1e-5
-        self.prev_velocity_kmh = calculated_speed_kmh_main
-
-        # --- БЕЗОПАСНАЯ КИНЕМАТИКА КОНТУРА Б (СТАБИЛИЗАТОР) ---
-        shift_z_physical_stab = 0.0
-        try:
-            res_stab = self.stabilizer_engine.update_odometry_fusion(raw_points, local_stab_idx, dt)
-            if isinstance(res_stab, (tuple, list)) and len(res_stab) > 0:
-                shift_z_physical_stab = float(res_stab[0])
-            else:
-                shift_z_physical_stab = float(res_stab) if res_stab is not None else 0.0
-        except Exception:
-            shift_z_physical_stab = 0.0
-
-        stab_speed = self.stabilizer_engine.prev_velocity_kmh
-
-        # --- ОРГАН АРБИТРАЖА НА ТАКТЕ 3 ---
-        # if local_stab_idx == 3:
-        #     expected_stab_step = (stab_speed / 3.6) * dt
-        #     stab_step_delta = abs(abs(shift_z_physical_stab) - abs(expected_stab_step))
-
-        #     if (self.prev_velocity_kmh <= 0.2 and stab_speed > 2.0 and stab_step_delta <= config.MAX_PHYSICAL_ACCEL_Z):
-        #         print(f"\n⚡ [ЯДРО ОДОМЕТРИИ АРБИТРАЖ]: Основной контур выведен из комы! "
-        #               f"Стабилизатор подтвержден (ΔШага {stab_step_delta:.4f}м <= {config.MAX_PHYSICAL_ACCEL_Z}м). "
-        #               f"Инжектирую скорость: {stab_speed:.2f} км/ч\n", flush=True)
-                
-        #         self.prev_velocity_kmh = stab_speed
-        #         self.anchor_map = self.stabilizer_engine.anchor_map
-        #         self.rail_raw_anchor = self.stabilizer_engine.rail_raw_anchor
-        #         self.rail_accum_z_predicted = self.stabilizer_engine.rail_accum_z_predicted
-                
-        #         shift_z_physical_main = shift_z_physical_stab
-                # --- МОДЕРНИЗИРОВАННЫЙ ОРГАН АРБИТРАЖА НА ТАКТЕ 3 (УПРАВЛЕНИЕ ИЗ CONFIG) ---
-        if local_stab_idx == 3:
-            expected_stab_step = (stab_speed / 3.6) * dt
-            stab_step_delta = abs(abs(shift_z_physical_stab) - abs(expected_stab_step))
-
-            # Считаем относительное различие между контурами (защита от деления на ноль +0.1)
-            velocity_ratio = (stab_speed + 0.1) / (self.prev_velocity_kmh + 0.1)
-            
-            # Условие А: Вывод основного контура из комы (уснул около нуля, а Б едет)
-            cond_coma = bool(
-                self.prev_velocity_kmh <= config.ARBITER_COMA_THRESHOLD_KMH and 
-                stab_speed > config.ARBITER_WAKEUP_SPEED_KMH
-            )
-            
-            # Условие Б: Критический разрыв пропорций в движении (дрифт знака или ложные стены)
-            cond_ratio_divergence = bool(
-                (velocity_ratio >= config.ARBITER_VELOCITY_RATIO_MAX or 
-                 velocity_ratio <= config.ARBITER_VELOCITY_RATIO_MIN) and 
-                stab_speed > config.ARBITER_MIN_STAB_SPEED_KMH
-            )
-
-            # Если шаг Стабилизатора физически адекватен и сработал один из триггеров недоверия
-            if (cond_coma or cond_ratio_divergence) and stab_step_delta <= config.MAX_PHYSICAL_ACCEL_Z:
-                
-                print(f"\n⚡ [ЯДРО ОДОМЕТРИИ АРБИТРАЖ ТРИГГЕР]: Зафиксировано критическое расхождение контуров! "
-                      f"Текущая А: {self.prev_velocity_kmh:.2f} км/ч | Стабилизатор Б: {stab_speed:.2f} км/ч. "
-                      f"Пропорция разрыва: {velocity_ratio:.1f}х (Порог: {config.ARBITER_VELOCITY_RATIO_MAX}х). "
-                      f"Принудительно инжектирую скорость и карту независимой песочницы Б!\n", flush=True)
-                
-                # Полная сквозная синхронизация Хроно-Карты и памяти скоростей из Контура Б в Контур А
-                self.prev_velocity_kmh = stab_speed
-                self.anchor_map = self.stabilizer_engine.anchor_map
-                self.rail_raw_anchor = self.stabilizer_engine.rail_raw_anchor
-                self.rail_accum_z_predicted = self.stabilizer_engine.rail_accum_z_predicted
-                
-                shift_z_physical_main = shift_z_physical_stab
-
-
-        return float(shift_z_physical_main), rail_passport_main
-
-
-    def extract_clean_macro_tunnel_from_memory(self, raw_points):
-        """СТАДИЯ 1.0 & 1.5 (ОНЛАЙН В ОЗУ): Адаптированная версия без чтения диска."""
-        # Монолитный фиксированный мост осей под контракт одометрии стен
-        points = np.zeros((len(raw_points), 4))
-        points[:, 0] = raw_points[:, 0]  # X_ширина
-        points[:, 1] = raw_points[:, 2]  # Y_высота
-        points[:, 2] = raw_points[:, 1] * config.AXIS_POLARITY  # Z_хода поезда
-        points[:, 3] = raw_points[:, 3]  # Интенсивность
-        
-        x, y, z = points[:, 0], points[:, 1], points[:, 2]
-        
-        tunnel_mask = (y > config.TUNNEL_Y_MIN) & (y < config.TUNNEL_Y_MAX) & \
-                      (z > config.LIDAR_MIN_Z) & (z < config.LIDAR_MAX_Z) & \
-                      (y > config.MIN_Y) & (y < config.MAX_Y)
-                      
-        outside_tracks_mask = (x < config.TRACK_GAUGE_LEFT) | (x > config.TRACK_GAUGE_RIGHT)
-        
-        clean_mask = tunnel_mask & outside_tracks_mask
-        tunnel_pts = points[clean_mask]
-        
-        if len(tunnel_pts) < 100:
-            return None
-
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(tunnel_pts[:, :3])
-        downsampled_pcd = pcd.voxel_down_sample(voxel_size=config.VOXEL_SIZE_BASE)
-        
-        downsampled_pcd.estimate_normals(
-            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=config.VOXEL_SIZE_BASE * 2.0, max_nn=30)
-        )
-        return downsampled_pcd
+        # 🟢 ВЕРНЫЙ ВЫХОД: Строка ретерна стоит НА ОДНОМ УРОВНЕ с if/else!
+        # Функция ГАРАНТИРОВАННО вернет кортеж (0.0, rail_passport) на кадре 0!
+        return float(final_shift_z), rail_passport
 
 
 
@@ -568,43 +349,77 @@ class StableLidarOdometryV12:
         return float(diff_shift_z), rail_passport
 
 
-    def extract_clean_macro_tunnel(self, filepath):
-        """СТАДИЯ 1.0 & 1.5: Сжатие облака вокселями и жесткая вырезка створа стен туннеля."""
-        if not os.path.exists(filepath):
-            return None
-            
-        raw_points = np.fromfile(filepath, dtype=np.float32).reshape(-1, 4)
-        
-        # 🟢 ОЧИЩЕННЫЙ ФИКСИРОВАННЫЙ МОСТ ОСЕЙ ПО КОНТРАКТУ ОДОМЕТРИИ (Индекс 1 — это ход Z):
-        points = np.zeros((len(raw_points), 4))
-        points[:, 0] = raw_points[:, 0]  # RAW_WIDTH_AXIS = 0   -> Твой Столбец 0 (X_ширина)
-        points[:, 1] = raw_points[:, 2]  # RAW_HEIGHT_AXIS = 2  -> Твой Столбец 1 (Y_высота)
-        points[:, 2] = raw_points[:, 1] * config.AXIS_POLARITY  # RAW_FORWARD_AXIS = 1 -> Твой Столбец 2 (Z_хода)
-        points[:, 3] = raw_points[:, 3]  # Интенсивность лазера
-        
-        x, y, z = points[:, 0], points[:, 1], points[:, 2]
-        
-        # Геометрическая маска туннеля и рельс на основе фиксированных осей
-        tunnel_mask = (y > config.TUNNEL_Y_MIN) & (y < config.TUNNEL_Y_MAX) & \
-                      (z > config.LIDAR_MIN_Z) & (z < config.LIDAR_MAX_Z) & \
-                      (y > config.MIN_Y) & (y < config.MAX_Y)
-                      
-        outside_tracks_mask = (x < config.TRACK_GAUGE_LEFT) | (x > config.TRACK_GAUGE_RIGHT)
-        
-        clean_mask = tunnel_mask & outside_tracks_mask
-        tunnel_pts = points[clean_mask]
-        
-        if len(tunnel_pts) < 100:
-            return None
+    def extract_clean_macro_tunnel(self, raw_points):
+        """
+        СТАДИЯ 1.0 & 1.5: Сжатие облака вокселями и жесткая вырезка створа стен туннеля.
+        Извлекает геометрию туннеля для расчета ИИ-одометрии стен.
+        🟢 ИСПРАВЛЕНО: Полностью вырезает центральный коридор путей (колею ±1.2м),
+        чтобы одометрия стен Стабилизатора не цеплялась за препятствия на рельсах
+        и нависающий потолок, ликвидируя прыжки скорости до 24 км/ч!
+        """
+        if raw_points is None or len(raw_points) == 0:
+            return np.empty((0, 4), dtype=np.float32)
 
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(tunnel_pts[:, :3])
-        downsampled_pcd = pcd.voxel_down_sample(voxel_size=config.VOXEL_SIZE_BASE)
+        # Выделяем пространственные координаты X, Y, Z
+        spatial_points = raw_points[:, :3]
         
-        downsampled_pcd.estimate_normals(
-            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=config.VOXEL_SIZE_BASE * 2.0, max_nn=30)
-        )
-        return downsampled_pcd
+        # 🟢 АНТИ-КЛИППИНГ ФИЛЬТР: Вырезаем центральный коридор, где лежат рельсы и преграды.
+        # Оставляем только те точки, которые находятся строго по бокам (X > 1.2м или X < -1.2м)
+        not_rails_corridor_mask = np.abs(spatial_points[:, 0]) > 1.20
+        
+        # Фильтруем облако для одометрии
+        macro_cloud = raw_points[not_rails_corridor_mask]
+        
+        if len(macro_cloud) == 0:
+            return np.empty((0, 4), dtype=np.float32)
+            
+        # Дополнительный статистический фильтр шума по высоте Y,
+        # чтобы отсечь экстремальные вылеты лазера (свод и кабельные короба потолка)
+        mean_y = np.mean(macro_cloud[:, 1])
+        std_y = np.std(macro_cloud[:, 1])
+        
+        # Пропускаем только устойчивую геометрию стен туннеля в пределах 2 сигма
+        clean_tunnel_mask = (macro_cloud[:, 1] >= (mean_y - 2.0 * std_y)) & (macro_cloud[:, 1] <= (mean_y + 2.0 * std_y))
+        
+        return macro_cloud[clean_tunnel_mask]
+
+    # def extract_clean_macro_tunnel(self, filepath):
+        
+    #     if not os.path.exists(filepath):
+    #         return None
+            
+    #     raw_points = np.fromfile(filepath, dtype=np.float32).reshape(-1, 4)
+        
+    #     # 🟢 ОЧИЩЕННЫЙ ФИКСИРОВАННЫЙ МОСТ ОСЕЙ ПО КОНТРАКТУ ОДОМЕТРИИ (Индекс 1 — это ход Z):
+    #     points = np.zeros((len(raw_points), 4))
+    #     points[:, 0] = raw_points[:, 0]  # RAW_WIDTH_AXIS = 0   -> Твой Столбец 0 (X_ширина)
+    #     points[:, 1] = raw_points[:, 2]  # RAW_HEIGHT_AXIS = 2  -> Твой Столбец 1 (Y_высота)
+    #     points[:, 2] = raw_points[:, 1] * config.AXIS_POLARITY  # RAW_FORWARD_AXIS = 1 -> Твой Столбец 2 (Z_хода)
+    #     points[:, 3] = raw_points[:, 3]  # Интенсивность лазера
+        
+    #     x, y, z = points[:, 0], points[:, 1], points[:, 2]
+        
+    #     # Геометрическая маска туннеля и рельс на основе фиксированных осей
+    #     tunnel_mask = (y > config.TUNNEL_Y_MIN) & (y < config.TUNNEL_Y_MAX) & \
+    #                   (z > config.LIDAR_MIN_Z) & (z < config.LIDAR_MAX_Z) & \
+    #                   (y > config.MIN_Y) & (y < config.MAX_Y)
+                      
+    #     outside_tracks_mask = (x < config.TRACK_GAUGE_LEFT) | (x > config.TRACK_GAUGE_RIGHT)
+        
+    #     clean_mask = tunnel_mask & outside_tracks_mask
+    #     tunnel_pts = points[clean_mask]
+        
+    #     if len(tunnel_pts) < 100:
+    #         return None
+
+    #     pcd = o3d.geometry.PointCloud()
+    #     pcd.points = o3d.utility.Vector3dVector(tunnel_pts[:, :3])
+    #     downsampled_pcd = pcd.voxel_down_sample(voxel_size=config.VOXEL_SIZE_BASE)
+        
+    #     downsampled_pcd.estimate_normals(
+    #         search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=config.VOXEL_SIZE_BASE * 2.0, max_nn=30)
+    #     )
+    #     return downsampled_pcd
     def build_passports_via_dbscan(self, macro_pcd):
         """ЭТАП 2: Сплошной DBSCAN по скелету стен для вычисления паспортов геометрии."""
         if macro_pcd is None:
@@ -843,14 +658,8 @@ class StableLidarOdometryV12:
         MIN_VELOCITY_STAND_THRESHOLD = getattr(config, "MIN_VELOCITY_STAND_THRESHOLD", 0.1)
         cond_low_speed = bool(self.prev_velocity_kmh < MIN_VELOCITY_STAND_THRESHOLD)
         
-                # --- ДИНАМИЧЕСКИЙ ПРЕФИКС ДЛЯ РАЗДЕЛЕНИЯ ЛОГОВ КОНТУРОВ ---
-        if self.is_stabilizer:
-            prefix = "⏳ [КОНТУР Б: СТАБИЛИЗАТОР]"
-        else:
-            prefix = "🎯 [КОНТУР А: ТЕКУЩАЯ ОДОМЕТРИЯ]"
-
-        if idx <= 250:
-            print(f"🔍 {prefix} Кадр #{idx:03d} | Шаг такта Z: {calculated_shift_z*100:.2f} см | "
+        if idx <= 250:  # Расширяем видимость принтов, чтобы захватить такты 130+
+            print(f"🔍 [СТАРТЕР ПРОВЕРКА 3]: Кадр #{idx:03d} | Шаг такта Z: {calculated_shift_z*100:.2f} см | "
                   f"Прошлая V: {self.prev_velocity_kmh:.2f} км/ч | "
                   f"Триггеры -> Мертвая зона: {cond_deadband}, Нет стен: {cond_no_matches}, Инерция активна: {cond_no_matches and is_moving_prior}", flush=True)
 

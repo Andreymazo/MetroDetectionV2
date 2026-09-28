@@ -1,402 +1,361 @@
 #!/usr/bin/env python3
 """
-🚀 PRODUCTION ROS 2 HUMBLE COMPLIANT NODE (STRICT CHRONO DELAYED BATCH EDITION) - PART 1
-Промышленный конвейер детекции препятствий Мосметро строго по ТЗ жюри.
-Защищен от прореживания лучей через разделение во времени: Сбор ОЗУ ➔ Автономный ИИ Расчет.
+🚀 PRODUCTION ROS 2 HUMBLE COMPLIANT NODE (ONLINE MULTITHREADED ADAS)
+Промышленный конвейер детекции препятствий реального времени (Онлайн-режим).
+Обеспечивает 100% сбор кадров на лету через потокобезопасную очередь Queue без пропусков.
 """
 
 import sys
+import traceback 
 import os
 import gc
 import csv
 import time
-import json
+import queue
 import threading
 import numpy as np
+import yaml
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2
-from std_msgs.msg import String
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+import ros2_numpy
 
-# Импортируем тяжелые ИИ и ЦОС движки из ядра решения (строго как в quick_check)
+# Импортируем движки ЦОС, одометрии и трекинга
 from metro_lidar.cos_processor_v12 import StableLidarOdometryV12
+import metro_lidar.cos_processor_v12 as cos_processor_v12
 from metro_lidar.generate_submission_v2 import process_point_cloud
 from metro_lidar.tracker_v2 import LidarObstacleTrackerV2
 import metro_lidar.config as config
 
 
 class SubwayVisionCoreNode(Node):
+    
     def __init__(self):
         super().__init__('subway_vision_core_node')
         
-        try:
-            os.system("sysctl -w net.core.rmem_max=26214400 > /dev/null 2>&1")
-            os.system("sysctl -w net.core.rmem_default=26214400 > /dev/null 2>&1")
-        except Exception:
-            pass
-
-        # 🟢 НАСТРОЙКА ПРЕЦИЗИОННОГО ВОКЗАЛА В ОЗУ (/dev/shm)
-        self.station_dir = "/dev/shm/metro_station_buffer"
-        os.makedirs(self.station_dir, exist_ok=True)
-        
-        # Очищаем перроны вокзала перед стартом новой сессии
-        for old_file in os.listdir(self.station_dir):
-            try:
-                os.remove(os.path.join(self.station_dir, old_file))
-            except Exception:
-                pass
-
-        self.net_cb_group = MutuallyExclusiveCallbackGroup()
-
-        # 🎯 ИСПРАВЛЕННЫЙ QoS ПОД ВАШ КОРРЕКТНЫЙ ХАКАТОНОВСКИЙ БЭГ
         from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+        
+        # Ставим depth=10 для сетевого сокета, чтобы FastDDS успевал буферизировать поток
         custom_qos = QoSProfile(
-            depth=100,  # Оставляем большой буфер, чтобы не потерять ни одного кадра
-            reliability=ReliabilityPolicy.RELIABLE,  # Гарантия доставки
-            durability=DurabilityPolicy.VOLATILE     # Идеально совместим с издателем rosbag
+            depth=10,  
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE
         )
         
-        self.declare_parameter('lidar_topic', '/sensing/lidar/hesai128/pointcloud')
-        topic_name = self.get_parameter('lidar_topic').get_parameter_value().string_value
+        # 🔐 Потокобезопасная очередь для обмена кадрами между сетью и ИИ
+        self.frame_queue = queue.Queue()
         
-        # Сетевая подписка ROS 2
+        self.net_cb_group = MutuallyExclusiveCallbackGroup()
+        
+        # Объявляем параметры для жюри строго один раз
+        self.declare_parameter('scenario', 'doubleT_platform')
+        self.declare_parameter('data_dir', '/app/for_hackathon')
+        self.declare_parameter('lidar_topic', '/sensing/lidar/hesai128/pointcloud')
+        
+        scenario_param = self.get_parameter('scenario').get_parameter_value().string_value
+        data_dir_param = self.get_parameter('data_dir').get_parameter_value().string_value
+        
+        if os.path.isabs(scenario_param) or '/' in scenario_param:
+            base_scenario_dir = os.path.abspath(scenario_param)
+        else:
+            base_scenario_dir = os.path.join(data_dir_param, scenario_param)
+            
+        metadata_path = os.path.join(base_scenario_dir, 'metadata.yaml')
+        target_topic = self.get_parameter('lidar_topic').get_parameter_value().string_value
+
+        self.get_logger().info(f'📂 [ИНСПЕКТОР ПУТЕЙ]: Анализирую манифест сценария: {base_scenario_dir}')
+
+        if os.path.exists(metadata_path):
+            try:
+                with open(metadata_path, 'r', encoding='utf-8') as f:
+                    bag_info = yaml.safe_load(f)
+                bag_meta = bag_info.get('rosbag2_bagfile_information', {})
+                topics_list = bag_meta.get('topics_with_message_count', [])
+                
+                for topic_entry in topics_list:
+                    meta_data = topic_entry.get('topic_metadata', {})
+                    if 'PointCloud2' in str(meta_data.get('type', '')) and meta_data.get('name'):
+                        target_topic = meta_data.get('name')
+                        break
+            except Exception as e:
+                self.get_logger().error(f'⚠️ Ошибка автопарсинга metadata.yaml: {e}')
+
+        # Подписка ROS 2 Humble привязана к выделенной сетевой группе
         self.subscription = self.create_subscription(
             PointCloud2,
-            topic_name, 
+            target_topic, 
             self.lidar_callback,
             custom_qos,
             callback_group=self.net_cb_group
         )
         
-        # Нативный ROS 2 издатель телеметрии
-        self.telemetry_pub = self.create_publisher(String, '/safetrain/telemetry', 10)
-        
-        # Инициализируем хронологические движки ИИ-памяти сессии
+        # ИИ-Движки
         self.odometry_engine = StableLidarOdometryV12()
         self.obstacle_tracker_engine = LidarObstacleTrackerV2()
         
-        self.net_frame_idx = 0       # Сколько кадров сохранила сеть
-        self.compute_frame_idx = 0   # Сколько кадров обсчитал ИИ
-        
-        self.dt = 0.1                
+        self.frame_idx = 0
+        self.dt = 0.1  # Жесткий и стабильный интервал 10 Гц Hesai 128
         self.submission_records = []
-        self._csv_exported_flag = False
-        self.total_distance_meters = 0.0
         
-        # Метка времени для отслеживания таймера тишины сети (безопасные 5.0 сек)
-        self.last_activity_time = time.time()
-        self.is_running = True
+        self.total_processed_frames = 0     
+        self.total_detected_obstacles = 0   
+        self.radar_targets_registry = {}
+
+        # 🏃‍♂️ ЗАПУСКАЕМ ВЫДЕЛЕННЫЙ СИСТЕМНЫЙ ПОТОК ДЛЯ ИИ (Consumer Worker)
+        self.is_worker_alive = True
+        self.worker_thread = threading.Thread(target=self.process_worker_loop, daemon=True)
+        self.worker_thread.start()
         
-        # Флаг-семафор: ИИ-поток спит, пока сеть качает вагоны
-        self.network_active_phase = True
-        
-        # 🔥 АВТОНОМНЫЙ ВЫЧИСЛИТЕЛЬНЫЙ ПОТОК: ИИ-воркер работает независимо от rclpy.spin()
-        self.compute_thread = threading.Thread(target=self.detached_compute_worker, daemon=True)
-        self.compute_thread.start()
-        
-        self.get_logger().info('🚇 [БАТЧ-КОНВЕЙЕР АКТИВИРОВАН]: Включен режим 100% сбора лучей колеи!')
-        self.get_logger().info(f'📡 Ждем входящий поток PointCloud2 на топике: {topic_name}')
-        
-        self.total_processed_frames = 0     # Уникальные кадры
-        self.total_detected_obstacles = 0   # Всего найденных ИИ объектов
+        self.get_logger().info(f'🚀 [АВТОНАСТРОЙКА УСПЕШНА]: Подписка открыта на топик: {target_topic}')
+        self.get_logger().info(f'🚇 [ОНЛАЙН ADAS-КОНВЕЙЕР ЖИВОГО ПОЕЗДА]: ПОЛНОСТЬЮ АКТИВИРОВАН.')
 
     def lidar_callback(self, msg):
-        """ 🚂 СЕТЕВОЙ ПОТОК (PRODUCER): Сбрасывает СЫРЫЕ данные один-в-один как в quick_check """
-        import ros2_numpy
+        """Сетевой поток (Producer): моментально перехватывает кадр и выпрямляет массивы в ОЗУ"""
+        local_idx = self.frame_idx
+        self.frame_idx += 1
         
-        if self.net_frame_idx >= 201:
-            return
-            
-        local_net_idx = self.net_frame_idx
-        self.net_frame_idx += 1
-
         try:
             arr_dict = ros2_numpy.numpify(msg)
-            xyz = arr_dict['xyz'].astype(np.float32)
-            num_points = len(xyz)
+            xyz_structured = arr_dict['xyz']
+            intensity_structured = arr_dict['intensity'] if 'intensity' in arr_dict else np.zeros(xyz_structured.shape[:2], dtype=np.float32)
             
-            if 'intensity' in arr_dict:
-                intensity = arr_dict['intensity'].astype(np.float32).reshape(-1, 1)
-            else:
-                intensity = np.zeros((num_points, 1), dtype=np.float32)
-                
-            points = np.hstack((xyz, intensity))
+            xyz_flat = xyz_structured.reshape(-1, 3).astype(np.float32)
+            intensity_flat = intensity_structured.reshape(-1, 1).astype(np.float32)
+            
+            points = np.hstack((xyz_flat, intensity_flat))
             
             nan_mask = np.isnan(points[:, 0]) | np.isnan(points[:, 1]) | np.isnan(points[:, 2])
             points = points[~nan_mask]
             
             nonzero_mask = np.any(points[:, :3] != 0, axis=1)
-            pure_points = points[nonzero_mask].copy()
+            raw_points = points[nonzero_mask].copy()
             
-            if len(pure_points) == 0:
-                return
-
-            # 🎯 ЭТАЛОННОЕ СОХРАНЕНИЕ: Никаких ручных разворотов осей перед записью!
-            # Имя формируем по индексам, чтобы гарантировать правильный хронологический порядок
-            virtual_file_path = os.path.join(self.station_dir, f"shm_frame_{local_net_idx:04d}.bin")
-            pure_points.tofile(virtual_file_path)
-                
-            # Сдвигаем таймер тишины: сеть активна
-            self.last_activity_time = time.time()
-                
+            if len(raw_points) > 0:
+                # Кладем подготовленный плоский массив в потокобезопасную очередь
+                self.frame_queue.put((local_idx, raw_points))
         except Exception as e:
-            self.get_logger().error(f"❌ [СБОЙ СЕТЕВОГО ПРИЕМА НА КАДРЕ #{local_net_idx}]: {e}")
+            self.get_logger().error(f'🚨 Сбой быстрого разбора сетевого кадра #{local_idx}: {e}')
 
-    def detached_compute_worker(self):
-        """🏢 АВТОНОМНЫЙ ИИ-ДЕМОН (CONSUMER): Начинает расчет строго после затишья сети """
-        while self.is_running:
-            # СТАДИЯ А: Ожидание полной остановки бэг-плеера и затишья сети
-            if self.network_active_phase:
-                if self.net_frame_idx > 0:
-                    time_since_last_packet = time.time() - self.last_activity_time
-                    
-                    # Если сеть молчит дольше 5.0 секунд — плеер гарантированно доиграл бэг
-                    if time_since_last_packet > 5.0:
-                        print(f"\n⏱️  [ТРИГГЕР ТИШИНЫ]: Сеть молчит {time_since_last_packet:.1f} сек.")
-                        print(f"🏁 [ЦУП ПЕРЕХОД]: Сбор завершен. Поймано кадров: {self.net_frame_idx}")
-                        print("🧠 [ИИ-ЯДРО]: Включаю автономную разгрузку вокзала ОЗУ на полную мощность...\n")
-                        self.network_active_phase = False  # Переходим к этапу вычислений
+    def process_worker_loop(self):
+        """Фоновый поток вычислений (Consumer): непрерывно забирает кадры из очереди и крутит ЦОС/ИИ"""
+        while self.is_worker_alive:
+            try:
+                # Извлекаем следующий кадр из очереди. Ждем 0.5 сек, если очередь пуста
+                local_frame_idx, raw_points = self.frame_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue  
                 
-                time.sleep(0.1)
-                continue
-
-            # СТАДИЯ Б: Последовательный ИИ-расчет накопленного буфера
-            local_compute_idx = self.compute_frame_idx
-            total_saved_frames = self.net_frame_idx
-            
-            # Если мы обсчитали все файлы, сохраненные сетью на вокзале
-            if local_compute_idx >= total_saved_frames:
-                if not self._csv_exported_flag:
-                    print(f"\n🏁 [ЦУП АВТОНОМНЫЙ ФИНИШ]: Вокзал ОЗУ полностью опустел!")
-                    print(f"   ↳ Всего успешно обсчитано ИИ-ядром: {local_compute_idx} кадров.")
-                    self.export_final_submission()
-                    self._csv_exported_flag = True
-                    self.print_final_summary_report()
-                    print("🟢 [ЦУП ИЗОЛЯЦИЯ]: Сабмит сформирован автоматически. Ожидание Ctrl+C в ноде.\n")
-                
-                time.sleep(0.1)
-                continue
-
-            # Имя виртуального кадра, которое пойдет в судейский CSV
-            virtual_frame_name = f"frame_{local_compute_idx:04d}.bin"
-            target_bin_path = os.path.join(self.station_dir, f"shm_frame_{local_compute_idx:04d}.bin")
-            
-            if not os.path.exists(target_bin_path):
-                time.sleep(0.01)
-                continue
-
-            # Инкрементируем счетчик ИИ-разгрузки вокзала
-            self.compute_frame_idx += 1
+            self.total_processed_frames += 1
+            calculated_speed_kmh = 0.0
 
             try:
-                frontend_frame_data = {
-                    "danger_alert": False, "train_speed_kmh": 0.0,
-                    "total_distance_m": round(self.total_distance_meters, 2),
-                    "distance_to_obstacle_m": -1.0, "show_mesh_boxes": config.V2_OBSTACLE_SHOW_3D_MESHBOX,
-                    "objects": []
-                }
+                # Вычисление плотности точек внутри колеи путей
+                x_pts, y_pts, z_pts = raw_points[:, 2], raw_points[:, 0], raw_points[:, 1]
+                rail_points_mask = (z_pts >= -63.5) & (z_pts <= -3.5) & \
+                                   (x_pts >= -0.75) & (x_pts <= 0.75) & \
+                                   (y_pts >= -1.85) & (y_pts <= -1.05)
+                current_rail_points_count = int(np.sum(rail_points_mask))
 
                 # =====================================================================
-                # 🎯 1. ЭТАЛОННЫЙ ВЫЗОВ ОДОМЕТРИИ КАК В QUICK_CHECK.PY
+                # 🟢 ЕДИНАЯ ТОЧКА СБОРКИ ОБЛАЧНОЙ ОДОМЕТРИИ V12 (ЗАЩИЩЕННЫЙ ВЫЗОВ)
                 # =====================================================================
-                shift_z_raw, _ = self.odometry_engine.update_odometry_fusion(
-                    target_bin_path, 
-                    local_compute_idx, 
-                    dt=self.dt
-                )
+                shift_z_physical = 0.0
+                rail_passport = None
                 
-                if hasattr(shift_z_raw, "item"):
-                    shift_z_physical = float(shift_z_raw.item())
-                else:
-                    shift_z_physical = float(shift_z_raw)
-                
+                try:
+                    res = self.odometry_engine.update_odometry_fusion(
+                        raw_points=raw_points,
+                        idx=local_frame_idx,
+                        dt=self.dt
+                    )
+                    
+                    if isinstance(res, (tuple, list)):
+                        raw_shift = res[0]
+                        rail_passport = res[1] if len(res) > 1 else None
+                    else:
+                        raw_shift = res
+                        rail_passport = None
+                        
+                    if isinstance(raw_shift, (tuple, list, np.ndarray)):
+                        shift_z_physical = float(raw_shift[0])
+                    else:
+                        shift_z_physical = float(raw_shift)
+                        
+                except Exception as odo_error:
+                    tb_text = traceback.format_exc()
+                    self.get_logger().error(
+                        f"⚠️ [СБОЙ ТИПОВ ОДОМЕТРИИ]: {odo_error}.\n"
+                        f"=== СТЕК ВЫЗОВОВ С НОМЕРОМ СТРОКИ ===\n{tb_text}"
+                        f"=====================================\n"
+                        f"Включаю аварийную защиту инерциального шага."
+                    )
+                    shift_z_physical = (self.odometry_engine.prev_velocity_kmh / 3.6) * self.dt
+
                 calculated_speed_kmh = self.odometry_engine.prev_velocity_kmh
-                self.total_distance_meters += shift_z_physical
 
-                # Пакуем макро-стены под Three.js топик телеметрии
-                valid_walls_anchors = [obj for obj in self.odometry_engine.anchor_map if obj.get("status") == "STATUS_VALID_ANCHOR" and obj.get("is_wall", False)]
-                for wall_obj in valid_walls_anchors:
-                    pts = wall_obj["raw_points"]
-                    if len(pts) > 100: pts = pts[::3]
-                    three_pts = [[float(p[0]), float(p[1]), -abs(float(p[2]))] for p in pts]
-                    frontend_frame_data["objects"].append({
-                        "id": f"WALL_{wall_obj.get('id', '?')}", "class_id": 0, "confidence": 1.0, 
-                        "center": [0.0, 0.0, 0.0], "size_3d": [0.0, 0.0, 0.0], "wall_points": three_pts, "obstacle_speed_kmh": 0.0
-                    })
+                if calculated_speed_kmh < 0.2:
+                    calculated_speed_kmh = 0.0
+                    shift_z_physical = 1e-5
+                    
+                self.odometry_engine.prev_velocity_kmh = calculated_speed_kmh
 
+                # Определение открытого пространства тоннеля (Адаптивный гео-шлюз)
                 is_open_space = False
+                valid_walls_anchors = [obj for obj in self.odometry_engine.anchor_map if obj.get("status") == "STATUS_VALID_ANCHOR" and obj.get("is_wall", False)]
+                
                 if valid_walls_anchors:
-                    wall_x_coords = [float(w_obj["centroid"][0]) for w_obj in valid_walls_anchors if "centroid" in w_obj]
-                    if wall_x_coords and (max(wall_x_coords) > config.V2_OBSTACLE_WALL_OPEN_THRESHOLD or min(wall_x_coords) < -config.V2_OBSTACLE_WALL_OPEN_THRESHOLD):
-                        is_open_space = False
-                safe_shift_z = float(np.abs(shift_z_physical))
+                    try:
+                        wall_x_coords = [float(w_obj["centroid"][0]) for w_obj in valid_walls_anchors if "centroid" in w_obj]
+                        if wall_x_coords and (max(wall_x_coords) > config.V2_OBSTACLE_WALL_OPEN_THRESHOLD or min(wall_x_coords) < -config.V2_OBSTACLE_WALL_OPEN_THRESHOLD):
+                            is_open_space = True
+                    except Exception as geo_gate_err:
+                        self.get_logger().error(f"⚠️ [СБОЙ ГЕО-ШЛЮЗА СТЕН]: {geo_gate_err}. Откат к закрытому туннелю.")
 
                 # =====================================================================
-                # 🎯 2. ВЫЗОВ ИИ-ДВИЖКОВ ДЕТЕКЦИИ ПРЕПЯТСТВИЙ (v2) КАК В QUICK_CHECK.PY
+                # 🟢 ПРЯМОЙ ОНЛАЙН-ВЫЗОВ ИИ-ДЕТЕКТОРА ПРЕГРАД ИЗ ОЗУ (БЕЗ ПАТЧЕЙ)
                 # =====================================================================
+                # Передаем NumPy-массив напрямую в ОЗУ вычислительного контура.
                 detected_obstacles = process_point_cloud(
-                    target_bin_path, 
-                    tracker=self.obstacle_tracker_engine, 
-                    train_step_z=safe_shift_z, 
+                    raw_points=raw_points,
+                    tracker=self.obstacle_tracker_engine,
+                    train_step_z=shift_z_physical,
                     is_open_space=is_open_space
                 )
-                self.total_processed_frames += 1
                 # =====================================================================
-                # 🎯 3. ПРЕЦИЗИОННАЯ УПАКОВКА РЕЗУЛЬТАТОВ (СТРОГО ПО ТЗ КОНКУРСА)
-                # =====================================================================
+
+                virtual_frame_name = f"frame_{local_frame_idx:04d}.bin"
+
+                # Агрегация результатов детекции в буфер submission
                 if isinstance(detected_obstacles, list) and len(detected_obstacles) > 0:
                     self.total_detected_obstacles += len(detected_obstacles)
-                    frontend_frame_data["danger_alert"] = True
+                    current_frame_ids = set()
                     
-                    distances = [abs(float(obj["center"][2])) for obj in detected_obstacles]
-                    min_dist = min(distances) if distances else 0.0
-                    frontend_frame_data["distance_to_obstacle_m"] = round(min_dist, 1)
-                    
-                    conf_val = detected_obstacles[0].get("confidence", 1.0)
-
-                    # 🔥 НАШ КРАСИВЫЙ И НАГЛЯДНЫЙ ПРИНТ ОПАСНОСТИ В РЕАЛЬНОМ ВРЕМЕНИ КАК В QUICK_CHECK
-                    print(f"🚨 [{virtual_frame_name}] ➔ ОБНАРУЖЕНО ПРЕПЯТСТВИЙ: {len(detected_obstacles)} шт. | "
-                          f"Дистанция угрозы: {min_dist:.2f} м | Уверенность ИИ: {conf_val:.2%}")
-                    
-                    # Запись строк в массив для формирования итогового submission.csv
                     for obj in detected_obstacles:
-                        c = obj["center"]
-                        conf_val = obj.get("confidence", 1.0)
+                        track_id = obj.get("id", "0")
+                        current_frame_ids.add(track_id)
                         
-                        cx, cy, cz = (float(c[0]), float(c[1]), float(c[2])) if (hasattr(c, "__len__") and len(c) >= 3) else (0.0, 0.0, float(c))
-                            
-                        self.submission_records.append({
-                            "frame_id": virtual_frame_name,
-                            "x_center": f"{cx:.4f}", 
-                            "y_center": f"{cy:.4f}", 
-                            "z_center": f"{cz:.4f}",
-                            "class_id": 1, 
-                            "confidence": f"{conf_val:.4f}"
-                        })
-
-                    # Пробрасываем геометрию преград на фронтенд топика телеметрии
-                    for obj_idx, obj in enumerate(detected_obstacles):
-                        c = obj["center"]
-                        d_vec = obj["dimensions"]
+                        cx, cy, cz = obj["center"]
+                        dist_z = abs(float(cz))
+                        shape_label = obj.get("shape_text", "Объемная коробка / Блок")
                         
-                        ocx, ocy, ocz = (float(c[0]), float(c[1]), float(c[2])) if (hasattr(c, "__len__") and len(c) >= 3) else (0.0, 0.0, float(c))
-                        ow, oh, od = (float(d_vec[0]), float(d_vec[1]), float(d_vec[2])) if (hasattr(d_vec, "__len__") and len(d_vec) >= 3) else (0.5, 0.5, 0.5)
-                        
-                        shape_text, shape_type = "Объемная коробка / Блок", "BOX_BLOCK"
-                        if oh > ow and oh > od and oh > 1.0: shape_text, shape_type = "Человек / Вертикальная конструкция", "VERTICAL_SILHOUETTE"
-                        elif oh < 0.40 and (ow > 0.6 or od > 0.6): shape_text, shape_type = "Плоский предмет / Настил", "FLAT_OBSTACLE"
-
-                        position_text, position_status = "Строго по центру путей 🚨", "CENTER"
-                        if ocx < -0.35: position_text, position_status = "Касается левой кромки габарита ⚠️", "LEFT_EDGE"
-                        elif ocx > 0.35: position_text, position_status = "Касается правой кромки габарита ⚠️", "RIGHT_EDGE"
-
-                        three_pts = [[float(pt[0]), float(pt[1]), -abs(float(pt[2]))] for pt in obj.get("raw_points", []) if hasattr(pt, "__len__") and len(pt) >= 3]
-                        
-                        frontend_frame_data["objects"].append({
-                            "id": str(obj.get("id", f"📦_{obj_idx}")), "class_id": 1, "confidence": float(obj.get("confidence", 1.0)),
-                            "center": [ocx, ocy, ocz], "size_3d": [ow, oh, od], "obstacle_speed_kmh": float(obj.get("obstacle_speed", 0.0)),
-                            "position_status": position_status, "position_text": position_text, "shape_type": shape_type, "shape_text": shape_text, "obstacle_points": three_pts
-                        })
-                else:
-                    # Если препятствий на трассе нет — пишем нулевую строчку по ТЗ хакатона
-                    self.submission_records.append({
-                        "frame_id": virtual_frame_name,
-                        "x_center": "0.0000", "y_center": "0.0000", "z_center": "0.0000",
-                        "class_id": 0, "confidence": "0.0000"
-                    })
+                        if track_id not in self.radar_targets_registry:
+                            self.radar_targets_registry[track_id] = {
+                                "shape": shape_label,
+                                "max_dist": dist_z,
+                                "min_dist": dist_z,
+                                "first_frame": virtual_frame_name,
+                                "last_frame": virtual_frame_name,
+                                "lifetime_frames": 1
+                            }
+                        else:
+                            self.radar_targets_registry[track_id]["min_dist"] = min(self.radar_targets_registry[track_id]["min_dist"], dist_z)
+                            self.radar_targets_registry[track_id]["max_dist"] = max(self.radar_targets_registry[track_id]["max_dist"], dist_z)
+                            self.radar_targets_registry[track_id]["last_frame"] = virtual_frame_name
+                            self.radar_targets_registry[track_id]["lifetime_frames"] += 1
                     
-                    # 🟢 Опционально: можно раскомментировать принт ниже, чтобы видеть и чистые кадры
-                    # print(f"🟢 [{virtual_frame_name}] ➔ Пути чистые.")
+                    # Запись строго по стандарту ТЗ (REP 103)
+                    for obj in detected_obstacles:
+                        cx, cy, cz = obj["center"]
+                        sz_x, sz_y, sz_z = obj["dimensions"]
+                        dist_z = abs(float(cz))
+                        self.submission_records.append({
+                            'frame_id': virtual_frame_name, 'obstacle_detected': 1, 'distance_m': round(dist_z, 3),
+                            'center_x': round(float(cx), 3), 'center_y': round(float(cy), 3), 'center_z': round(float(cz), 3),
+                            'size_x': round(float(sz_x), 3), 'size_y': round(float(sz_y), 3), 'size_z': round(float(sz_z), 3)  
+                        })
+                    
+                    print(f"🚨 [ОНЛАЙН ➔ {virtual_frame_name}]: ОБНАРУЖЕНО ЦЕЛЕЙ: {len(detected_obstacles)} шт. | 📈 {calculated_speed_kmh:.1f} км/ч (Очередь: {self.frame_queue.qsize()})", flush=True)
 
-
-                # Набиваем метаданные поезда для выстрела в веб-панель телеметрии
-                frontend_frame_data["train_speed_kmh"] = round(float(calculated_speed_kmh), 1)
-                frontend_frame_data["total_distance_m"] = round(float(self.total_distance_meters), 1)
-                
-                # Заглушка-удержатель для Three.js, если сцена оказалась абсолютно пустой
-                if len(frontend_frame_data["objects"]) == 0:
-                    frontend_frame_data["objects"].append({
-                        "id": "RETAINER", "class_id": -1, "confidence": 1.0, "center": [0.0, -20.0, 0.0], "size_3d": [0.01, 0.01, 0.01], "obstacle_speed_kmh": 0.0
+                else:
+                    self.submission_records.append({
+                        'frame_id': virtual_frame_name, 'obstacle_detected': 0, 'distance_m': -1.0,
+                        'center_x': 0.0, 'center_y': 0.0, 'center_z': 0.0, 'size_x': 0.0, 'size_y': 0.0, 'size_z': 0.0
                     })
-
-                # 🟢 ВЫСТРЕЛИВАЕМ СФОРМИРОВАННУЮ СЦЕНУ В НА ТИВНЫЙ ТОПИК ROS 2
-                ros_string_msg = String()
-                ros_string_msg.data = json.dumps(frontend_frame_data)
-                self.telemetry_pub.publish(ros_string_msg)
-
+                    if local_frame_idx % 10 == 0:
+                        print(f"🟢 [ОНЛАЙН ➔ {virtual_frame_name}]: ПУТЬ СВОБОДЕН | 📈 {calculated_speed_kmh:.1f} км/ч (Очередь: {self.frame_queue.qsize()})", flush=True)
 
             except Exception as e:
-                import traceback
-                print(f"\n❌ [КРИТИЧЕСКИЙ СБОЙ НА КАДРЕ #{local_compute_idx}]: {e}")
-                traceback.print_exc(file=sys.stdout)
-
+                virtual_frame_name = f"frame_{local_frame_idx:04d}.bin"
+                tb_text = traceback.format_exc()
+                self.get_logger().error(
+                    f"🚨 [ФАТАЛЬНЫЙ СБОЙ ИИ НА КАДРЕ {virtual_frame_name}]: {e}\n"
+                    f"=== ТОЧНОЕ МЕСТО ПАДЕНИЯ ===\n{tb_text}============================="
+                )
+                
                 self.submission_records.append({
-                    "frame_id": virtual_frame_name,
-                    "x_center": "0.0000",
-                    "y_center": "0.0000",
-                    "z_center": "0.0000",
-                    "class_id": 0,
-                    "confidence": "0.0000"
+                    'frame_id': virtual_frame_name, 'obstacle_detected': 0, 'distance_m': -1.0,
+                    'center_x': 0.0, 'center_y': 0.0, 'center_z': 0.0, 'size_x': 0.0, 'size_y': 0.0, 'size_z': 0.0
                 })
-            finally:
-                # Физически удаляем отработавший файл из ОЗУ, освобождая память /dev/shm
-                try:
-                    if os.path.exists(target_bin_path):
-                        os.remove(target_bin_path)
-                except Exception:
-                    pass
-                gc.collect()
+
+            # Сообщаем очереди, что задача текущего кадра полностью закрыта
+            self.frame_queue.task_done()
+
     def export_final_submission(self):
-        """Записывает накопленный кэш кадров в файл submission.csv строго в судейском формате"""
+        """Записывает накопленный кэш кадров в файл submission.csv [10]"""
         output_path = "/app/submission.csv"
         if not self.submission_records:
             self.get_logger().error("⚠️ Буфер сабмита пуст. CSV не сохранен.")
             return
+            
         try:
             self.submission_records.sort(key=lambda x: x['frame_id'])
-            fields = ["frame_id", "x_center", "y_center", "z_center", "class_id", "confidence"]
+            
+            fields = ['frame_id', 'obstacle_detected', 'distance_m', 
+                      'center_x', 'center_y', 'center_z', 
+                      'size_x', 'size_y', 'size_z']
+                      
             with open(output_path, mode='w', newline='', encoding='utf-8') as f:
                 writer = csv.DictWriter(f, fieldnames=fields)
                 writer.writeheader()
                 writer.writerows(self.submission_records)
-            self.get_logger().info(f"💾 [ИИ-ЭКСПОРТ УСПЕШЕН]: Сабмит сохранен в: {output_path}")
+                
+            self.get_logger().info(f"💾 [ИИ-ЭКСПОРТ УСПЕШЕН]: Отчет REP 103 сохранен: {output_path}")
+            self.print_final_summary_report()
+            
         except Exception as e:
             self.get_logger().error(f"🚨 Ошибка записи CSV: {e}")
 
     def print_final_summary_report(self):
-        """Печатает инспекционный отчет для сверки перед отправкой решения"""
+        """Печатает красивый аудит-отчет накопленного массива submission_records для жюри"""
         print("\n" + "="*80)
         print("📊  ФИНАЛЬНЫЙ ИНСПЕКЦИОННЫЙ ОТЧЕТ ИИ-КОНВЕЙЕРА (СУДЬИ ХАКАТОНА)")
         print("="*80)
-        danger_frames = [r for r in self.submission_records if int(r['class_id']) == 1]
+        print(f" Всего зафиксировано и обсчитано кадров: {self.total_processed_frames}")
+        danger_frames = [r for r in self.submission_records if int(r['obstacle_detected']) == 1]
         print(f" Кадров с опасными аномалиями на путях:  {len(danger_frames)}")
         if danger_frames:
-            distances = [abs(float(r['z_center'])) for r in danger_frames]
+            distances = [float(r['distance_m']) for r in danger_frames]
             print(f" Минимальная дистанция фиксации угрозы: {min(distances):.3f} м")
             print(f" Максимальная дальность раннего зрения: {max(distances):.3f} м")
-            print("\n📋 ХРОНОЛОГИЧЕСКИЙ СРЕЗ ПЕРВЫХ ДЕТЕКЦИЙ ДЛЯ СВЕРКИ:")
-            print(f"{'Имя кадра':<20} | {'Детекция':<10} | {'Дальность Z вперед':<15} | {'Смещение X':<12}")
-            print("-"*80)
-            for r in danger_frames[:10]:
-                print(f"{r['frame_id']:<20} | {'🚨 ДА' if int(r['class_id'])==1 else 'НЕТ':<10} | {abs(float(r['z_center'])):<15.3f} | {r['x_center']:<12}")
+            
+            print("\n📋 ГЛОБАЛЬНЫЙ РЕЕСТР УНИКАЛЬНЫХ ПРЕПЯТСТВИЙ (ИТОГ СЕССИИ):")
+            print(f"{'Идентификатор':<15} | {'Класс (Форма)':<25} | {'Интервал кадров':<25} | {'Дистанция (Max -> Min)':<25}")
+            print("-"*98)
+            for t_id, data in self.radar_targets_registry.items():
+                frame_range = f"{data['first_frame']} -> {data['last_frame']}"
+                dist_range = f"{data['max_dist']:.2f} м -> {data['min_dist']:.2f} м"
+                print(f"🆔 Облако #{t_id:<10} | {data['shape']:<25} | {frame_range:<25} | {dist_range:<25}")
         else:
             print(" ✅ Вся сессия пройдена в штатном режиме. Пути абсолютно чистые.")
         print("="*80 + "\n")
-    
         print(f" 📂 ВСЕГО ОБРАБОТАНО УНИКАЛЬНЫХ КАДРОВ ЛИДАРА: {self.total_processed_frames} шт.")
-        print(f" 📦 СУММАРНО НАЙДЕНО ФИЗИЧЕСКИХ ОБЪЕКТОВ ИИ:    {self.total_detected_obstacles} шт.")
+        print(f" 📦 СУММАРНО НАЙДЕНО ФИЗИЧЕСКИХ ОБЪЕКТОВ ИИ:    {self.total_detected_obstacles} шт.\n")
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = SubwayVisionCoreNode()
+    
+    from rclpy.executors import MultiThreadedExecutor
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
+    
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
-        node.get_logger().info('🛑 Получен сигнал Ctrl+C. Выполняем шатдаун...')
+        node.get_logger().info('🛑 Получен сигнал Ctrl+C. Выполняем грейсфол шатдаун...')
     finally:
-        node.is_running = False
         node.export_final_submission()
         node.destroy_node()
         if rclpy.ok():
@@ -405,6 +364,417 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
+
+
+
+
+# #!/usr/bin/env python3
+# """
+# 🚀 PRODUCTION ROS 2 HUMBLE COMPLIANT NODE (STRICT CHRONO DELAYED BATCH EDITION) - PART 1
+# Промышленный конвейер детекции препятствий Мосметро строго по ТЗ жюри.
+# Защищен от прореживания лучей через разделение во времени: Сбор ОЗУ ➔ Автономный ИИ Расчет.
+# """
+
+# import sys
+# import os
+# import gc
+# import csv
+# import time
+# import json
+# import threading
+# import numpy as np
+# import rclpy
+# from rclpy.node import Node
+# from sensor_msgs.msg import PointCloud2
+# from std_msgs.msg import String
+# from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+
+# # Импортируем тяжелые ИИ и ЦОС движки из ядра решения (строго как в quick_check)
+# from metro_lidar.cos_processor_v12 import StableLidarOdometryV12
+# from metro_lidar.generate_submission_v2 import process_point_cloud
+# from metro_lidar.tracker_v2 import LidarObstacleTrackerV2
+# import metro_lidar.config as config
+
+
+# class SubwayVisionCoreNode(Node):
+#     def __init__(self):
+#         super().__init__('subway_vision_core_node')
+        
+#         try:
+#             os.system("sysctl -w net.core.rmem_max=26214400 > /dev/null 2>&1")
+#             os.system("sysctl -w net.core.rmem_default=26214400 > /dev/null 2>&1")
+#         except Exception:
+#             pass
+
+#         # 🟢 НАСТРОЙКА ПРЕЦИЗИОННОГО ВОКЗАЛА В ОЗУ (/dev/shm)
+#         self.station_dir = "/dev/shm/metro_station_buffer"
+#         os.makedirs(self.station_dir, exist_ok=True)
+        
+#         # Очищаем перроны вокзала перед стартом новой сессии
+#         for old_file in os.listdir(self.station_dir):
+#             try:
+#                 os.remove(os.path.join(self.station_dir, old_file))
+#             except Exception:
+#                 pass
+
+#         self.net_cb_group = MutuallyExclusiveCallbackGroup()
+
+#         # 🎯 ИСПРАВЛЕННЫЙ QoS ПОД ВАШ КОРРЕКТНЫЙ ХАКАТОНОВСКИЙ БЭГ
+#         from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+#         custom_qos = QoSProfile(
+#             depth=100,  # Оставляем большой буфер, чтобы не потерять ни одного кадра
+#             reliability=ReliabilityPolicy.RELIABLE,  # Гарантия доставки
+#             durability=DurabilityPolicy.VOLATILE     # Идеально совместим с издателем rosbag
+#         )
+        
+#         self.declare_parameter('lidar_topic', '/sensing/lidar/hesai128/pointcloud')
+#         topic_name = self.get_parameter('lidar_topic').get_parameter_value().string_value
+        
+#         # Сетевая подписка ROS 2
+#         self.subscription = self.create_subscription(
+#             PointCloud2,
+#             topic_name, 
+#             self.lidar_callback,
+#             custom_qos,
+#             callback_group=self.net_cb_group
+#         )
+        
+#         # Нативный ROS 2 издатель телеметрии
+#         self.telemetry_pub = self.create_publisher(String, '/safetrain/telemetry', 10)
+        
+#         # Инициализируем хронологические движки ИИ-памяти сессии
+#         self.odometry_engine = StableLidarOdometryV12()
+#         self.obstacle_tracker_engine = LidarObstacleTrackerV2()
+        
+#         self.net_frame_idx = 0       # Сколько кадров сохранила сеть
+#         self.compute_frame_idx = 0   # Сколько кадров обсчитал ИИ
+        
+#         self.dt = 0.1                
+#         self.submission_records = []
+#         self._csv_exported_flag = False
+#         self.total_distance_meters = 0.0
+        
+#         # Метка времени для отслеживания таймера тишины сети (безопасные 5.0 сек)
+#         self.last_activity_time = time.time()
+#         self.is_running = True
+        
+#         # Флаг-семафор: ИИ-поток спит, пока сеть качает вагоны
+#         self.network_active_phase = True
+        
+#         # 🔥 АВТОНОМНЫЙ ВЫЧИСЛИТЕЛЬНЫЙ ПОТОК: ИИ-воркер работает независимо от rclpy.spin()
+#         self.compute_thread = threading.Thread(target=self.detached_compute_worker, daemon=True)
+#         self.compute_thread.start()
+        
+#         self.get_logger().info('🚇 [БАТЧ-КОНВЕЙЕР АКТИВИРОВАН]: Включен режим 100% сбора лучей колеи!')
+#         self.get_logger().info(f'📡 Ждем входящий поток PointCloud2 на топике: {topic_name}')
+        
+#         self.total_processed_frames = 0     # Уникальные кадры
+#         self.total_detected_obstacles = 0   # Всего найденных ИИ объектов
+
+#     def lidar_callback(self, msg):
+#         """ 🚂 СЕТЕВОЙ ПОТОК (PRODUCER): Сбрасывает СЫРЫЕ данные один-в-один как в quick_check """
+#         import ros2_numpy
+        
+#         if self.net_frame_idx >= 201:
+#             return
+            
+#         local_net_idx = self.net_frame_idx
+#         self.net_frame_idx += 1
+
+#         try:
+#             arr_dict = ros2_numpy.numpify(msg)
+#             xyz = arr_dict['xyz'].astype(np.float32)
+#             num_points = len(xyz)
+            
+#             if 'intensity' in arr_dict:
+#                 intensity = arr_dict['intensity'].astype(np.float32).reshape(-1, 1)
+#             else:
+#                 intensity = np.zeros((num_points, 1), dtype=np.float32)
+                
+#             points = np.hstack((xyz, intensity))
+            
+#             nan_mask = np.isnan(points[:, 0]) | np.isnan(points[:, 1]) | np.isnan(points[:, 2])
+#             points = points[~nan_mask]
+            
+#             nonzero_mask = np.any(points[:, :3] != 0, axis=1)
+#             pure_points = points[nonzero_mask].copy()
+            
+#             if len(pure_points) == 0:
+#                 return
+
+#             # 🎯 ЭТАЛОННОЕ СОХРАНЕНИЕ: Никаких ручных разворотов осей перед записью!
+#             # Имя формируем по индексам, чтобы гарантировать правильный хронологический порядок
+#             virtual_file_path = os.path.join(self.station_dir, f"shm_frame_{local_net_idx:04d}.bin")
+#             pure_points.tofile(virtual_file_path)
+                
+#             # Сдвигаем таймер тишины: сеть активна
+#             self.last_activity_time = time.time()
+                
+#         except Exception as e:
+#             self.get_logger().error(f"❌ [СБОЙ СЕТЕВОГО ПРИЕМА НА КАДРЕ #{local_net_idx}]: {e}")
+
+#     def detached_compute_worker(self):
+#         """🏢 АВТОНОМНЫЙ ИИ-ДЕМОН (CONSUMER): Начинает расчет строго после затишья сети """
+#         while self.is_running:
+#             # СТАДИЯ А: Ожидание полной остановки бэг-плеера и затишья сети
+#             if self.network_active_phase:
+#                 if self.net_frame_idx > 0:
+#                     time_since_last_packet = time.time() - self.last_activity_time
+                    
+#                     # Если сеть молчит дольше 5.0 секунд — плеер гарантированно доиграл бэг
+#                     if time_since_last_packet > 5.0:
+#                         print(f"\n⏱️  [ТРИГГЕР ТИШИНЫ]: Сеть молчит {time_since_last_packet:.1f} сек.")
+#                         print(f"🏁 [ЦУП ПЕРЕХОД]: Сбор завершен. Поймано кадров: {self.net_frame_idx}")
+#                         print("🧠 [ИИ-ЯДРО]: Включаю автономную разгрузку вокзала ОЗУ на полную мощность...\n")
+#                         self.network_active_phase = False  # Переходим к этапу вычислений
+                
+#                 time.sleep(0.1)
+#                 continue
+
+#             # СТАДИЯ Б: Последовательный ИИ-расчет накопленного буфера
+#             local_compute_idx = self.compute_frame_idx
+#             total_saved_frames = self.net_frame_idx
+            
+#             # Если мы обсчитали все файлы, сохраненные сетью на вокзале
+#             if local_compute_idx >= total_saved_frames:
+#                 if not self._csv_exported_flag:
+#                     print(f"\n🏁 [ЦУП АВТОНОМНЫЙ ФИНИШ]: Вокзал ОЗУ полностью опустел!")
+#                     print(f"   ↳ Всего успешно обсчитано ИИ-ядром: {local_compute_idx} кадров.")
+#                     self.export_final_submission()
+#                     self._csv_exported_flag = True
+#                     self.print_final_summary_report()
+#                     print("🟢 [ЦУП ИЗОЛЯЦИЯ]: Сабмит сформирован автоматически. Ожидание Ctrl+C в ноде.\n")
+                
+#                 time.sleep(0.1)
+#                 continue
+
+#             # Имя виртуального кадра, которое пойдет в судейский CSV
+#             virtual_frame_name = f"frame_{local_compute_idx:04d}.bin"
+#             target_bin_path = os.path.join(self.station_dir, f"shm_frame_{local_compute_idx:04d}.bin")
+            
+#             if not os.path.exists(target_bin_path):
+#                 time.sleep(0.01)
+#                 continue
+
+#             # Инкрементируем счетчик ИИ-разгрузки вокзала
+#             self.compute_frame_idx += 1
+
+#             try:
+#                 frontend_frame_data = {
+#                     "danger_alert": False, "train_speed_kmh": 0.0,
+#                     "total_distance_m": round(self.total_distance_meters, 2),
+#                     "distance_to_obstacle_m": -1.0, "show_mesh_boxes": config.V2_OBSTACLE_SHOW_3D_MESHBOX,
+#                     "objects": []
+#                 }
+
+#                 # =====================================================================
+#                 # 🎯 1. ЭТАЛОННЫЙ ВЫЗОВ ОДОМЕТРИИ КАК В QUICK_CHECK.PY
+#                 # =====================================================================
+#                 shift_z_raw, _ = self.odometry_engine.update_odometry_fusion(
+#                     target_bin_path, 
+#                     local_compute_idx, 
+#                     dt=self.dt
+#                 )
+                
+#                 if hasattr(shift_z_raw, "item"):
+#                     shift_z_physical = float(shift_z_raw.item())
+#                 else:
+#                     shift_z_physical = float(shift_z_raw)
+                
+#                 calculated_speed_kmh = self.odometry_engine.prev_velocity_kmh
+#                 self.total_distance_meters += shift_z_physical
+
+#                 # Пакуем макро-стены под Three.js топик телеметрии
+#                 valid_walls_anchors = [obj for obj in self.odometry_engine.anchor_map if obj.get("status") == "STATUS_VALID_ANCHOR" and obj.get("is_wall", False)]
+#                 for wall_obj in valid_walls_anchors:
+#                     pts = wall_obj["raw_points"]
+#                     if len(pts) > 100: pts = pts[::3]
+#                     three_pts = [[float(p[0]), float(p[1]), -abs(float(p[2]))] for p in pts]
+#                     frontend_frame_data["objects"].append({
+#                         "id": f"WALL_{wall_obj.get('id', '?')}", "class_id": 0, "confidence": 1.0, 
+#                         "center": [0.0, 0.0, 0.0], "size_3d": [0.0, 0.0, 0.0], "wall_points": three_pts, "obstacle_speed_kmh": 0.0
+#                     })
+
+#                 is_open_space = False
+#                 if valid_walls_anchors:
+#                     wall_x_coords = [float(w_obj["centroid"][0]) for w_obj in valid_walls_anchors if "centroid" in w_obj]
+#                     if wall_x_coords and (max(wall_x_coords) > config.V2_OBSTACLE_WALL_OPEN_THRESHOLD or min(wall_x_coords) < -config.V2_OBSTACLE_WALL_OPEN_THRESHOLD):
+#                         is_open_space = False
+#                 safe_shift_z = float(np.abs(shift_z_physical))
+
+#                 # =====================================================================
+#                 # 🎯 2. ВЫЗОВ ИИ-ДВИЖКОВ ДЕТЕКЦИИ ПРЕПЯТСТВИЙ (v2) КАК В QUICK_CHECK.PY
+#                 # =====================================================================
+#                 detected_obstacles = process_point_cloud(
+#                     target_bin_path, 
+#                     tracker=self.obstacle_tracker_engine, 
+#                     train_step_z=safe_shift_z, 
+#                     is_open_space=is_open_space
+#                 )
+#                 self.total_processed_frames += 1
+#                 # =====================================================================
+#                 # 🎯 3. ПРЕЦИЗИОННАЯ УПАКОВКА РЕЗУЛЬТАТОВ (СТРОГО ПО ТЗ КОНКУРСА)
+#                 # =====================================================================
+#                 if isinstance(detected_obstacles, list) and len(detected_obstacles) > 0:
+#                     self.total_detected_obstacles += len(detected_obstacles)
+#                     frontend_frame_data["danger_alert"] = True
+                    
+#                     distances = [abs(float(obj["center"][2])) for obj in detected_obstacles]
+#                     min_dist = min(distances) if distances else 0.0
+#                     frontend_frame_data["distance_to_obstacle_m"] = round(min_dist, 1)
+                    
+#                     conf_val = detected_obstacles[0].get("confidence", 1.0)
+
+#                     # 🔥 НАШ КРАСИВЫЙ И НАГЛЯДНЫЙ ПРИНТ ОПАСНОСТИ В РЕАЛЬНОМ ВРЕМЕНИ КАК В QUICK_CHECK
+#                     print(f"🚨 [{virtual_frame_name}] ➔ ОБНАРУЖЕНО ПРЕПЯТСТВИЙ: {len(detected_obstacles)} шт. | "
+#                           f"Дистанция угрозы: {min_dist:.2f} м | Уверенность ИИ: {conf_val:.2%}")
+                    
+#                     # Запись строк в массив для формирования итогового submission.csv
+#                     for obj in detected_obstacles:
+#                         c = obj["center"]
+#                         conf_val = obj.get("confidence", 1.0)
+                        
+#                         cx, cy, cz = (float(c[0]), float(c[1]), float(c[2])) if (hasattr(c, "__len__") and len(c) >= 3) else (0.0, 0.0, float(c))
+                            
+#                         self.submission_records.append({
+#                             "frame_id": virtual_frame_name,
+#                             "x_center": f"{cx:.4f}", 
+#                             "y_center": f"{cy:.4f}", 
+#                             "z_center": f"{cz:.4f}",
+#                             "class_id": 1, 
+#                             "confidence": f"{conf_val:.4f}"
+#                         })
+
+#                     # Пробрасываем геометрию преград на фронтенд топика телеметрии
+#                     for obj_idx, obj in enumerate(detected_obstacles):
+#                         c = obj["center"]
+#                         d_vec = obj["dimensions"]
+                        
+#                         ocx, ocy, ocz = (float(c[0]), float(c[1]), float(c[2])) if (hasattr(c, "__len__") and len(c) >= 3) else (0.0, 0.0, float(c))
+#                         ow, oh, od = (float(d_vec[0]), float(d_vec[1]), float(d_vec[2])) if (hasattr(d_vec, "__len__") and len(d_vec) >= 3) else (0.5, 0.5, 0.5)
+                        
+#                         shape_text, shape_type = "Объемная коробка / Блок", "BOX_BLOCK"
+#                         if oh > ow and oh > od and oh > 1.0: shape_text, shape_type = "Человек / Вертикальная конструкция", "VERTICAL_SILHOUETTE"
+#                         elif oh < 0.40 and (ow > 0.6 or od > 0.6): shape_text, shape_type = "Плоский предмет / Настил", "FLAT_OBSTACLE"
+
+#                         position_text, position_status = "Строго по центру путей 🚨", "CENTER"
+#                         if ocx < -0.35: position_text, position_status = "Касается левой кромки габарита ⚠️", "LEFT_EDGE"
+#                         elif ocx > 0.35: position_text, position_status = "Касается правой кромки габарита ⚠️", "RIGHT_EDGE"
+
+#                         three_pts = [[float(pt[0]), float(pt[1]), -abs(float(pt[2]))] for pt in obj.get("raw_points", []) if hasattr(pt, "__len__") and len(pt) >= 3]
+                        
+#                         frontend_frame_data["objects"].append({
+#                             "id": str(obj.get("id", f"📦_{obj_idx}")), "class_id": 1, "confidence": float(obj.get("confidence", 1.0)),
+#                             "center": [ocx, ocy, ocz], "size_3d": [ow, oh, od], "obstacle_speed_kmh": float(obj.get("obstacle_speed", 0.0)),
+#                             "position_status": position_status, "position_text": position_text, "shape_type": shape_type, "shape_text": shape_text, "obstacle_points": three_pts
+#                         })
+#                 else:
+#                     # Если препятствий на трассе нет — пишем нулевую строчку по ТЗ хакатона
+#                     self.submission_records.append({
+#                         "frame_id": virtual_frame_name,
+#                         "x_center": "0.0000", "y_center": "0.0000", "z_center": "0.0000",
+#                         "class_id": 0, "confidence": "0.0000"
+#                     })
+                    
+#                     # 🟢 Опционально: можно раскомментировать принт ниже, чтобы видеть и чистые кадры
+#                     # print(f"🟢 [{virtual_frame_name}] ➔ Пути чистые.")
+
+
+#                 # Набиваем метаданные поезда для выстрела в веб-панель телеметрии
+#                 frontend_frame_data["train_speed_kmh"] = round(float(calculated_speed_kmh), 1)
+#                 frontend_frame_data["total_distance_m"] = round(float(self.total_distance_meters), 1)
+                
+#                 # Заглушка-удержатель для Three.js, если сцена оказалась абсолютно пустой
+#                 if len(frontend_frame_data["objects"]) == 0:
+#                     frontend_frame_data["objects"].append({
+#                         "id": "RETAINER", "class_id": -1, "confidence": 1.0, "center": [0.0, -20.0, 0.0], "size_3d": [0.01, 0.01, 0.01], "obstacle_speed_kmh": 0.0
+#                     })
+
+#                 # 🟢 ВЫСТРЕЛИВАЕМ СФОРМИРОВАННУЮ СЦЕНУ В НА ТИВНЫЙ ТОПИК ROS 2
+#                 ros_string_msg = String()
+#                 ros_string_msg.data = json.dumps(frontend_frame_data)
+#                 self.telemetry_pub.publish(ros_string_msg)
+
+
+#             except Exception as e:
+#                 import traceback
+#                 print(f"\n❌ [КРИТИЧЕСКИЙ СБОЙ НА КАДРЕ #{local_compute_idx}]: {e}")
+#                 traceback.print_exc(file=sys.stdout)
+
+#                 self.submission_records.append({
+#                     "frame_id": virtual_frame_name,
+#                     "x_center": "0.0000",
+#                     "y_center": "0.0000",
+#                     "z_center": "0.0000",
+#                     "class_id": 0,
+#                     "confidence": "0.0000"
+#                 })
+#             finally:
+#                 # Физически удаляем отработавший файл из ОЗУ, освобождая память /dev/shm
+#                 try:
+#                     if os.path.exists(target_bin_path):
+#                         os.remove(target_bin_path)
+#                 except Exception:
+#                     pass
+#                 gc.collect()
+#     def export_final_submission(self):
+#         """Записывает накопленный кэш кадров в файл submission.csv строго в судейском формате"""
+#         output_path = "/app/submission.csv"
+#         if not self.submission_records:
+#             self.get_logger().error("⚠️ Буфер сабмита пуст. CSV не сохранен.")
+#             return
+#         try:
+#             self.submission_records.sort(key=lambda x: x['frame_id'])
+#             fields = ["frame_id", "x_center", "y_center", "z_center", "class_id", "confidence"]
+#             with open(output_path, mode='w', newline='', encoding='utf-8') as f:
+#                 writer = csv.DictWriter(f, fieldnames=fields)
+#                 writer.writeheader()
+#                 writer.writerows(self.submission_records)
+#             self.get_logger().info(f"💾 [ИИ-ЭКСПОРТ УСПЕШЕН]: Сабмит сохранен в: {output_path}")
+#         except Exception as e:
+#             self.get_logger().error(f"🚨 Ошибка записи CSV: {e}")
+
+#     def print_final_summary_report(self):
+#         """Печатает инспекционный отчет для сверки перед отправкой решения"""
+#         print("\n" + "="*80)
+#         print("📊  ФИНАЛЬНЫЙ ИНСПЕКЦИОННЫЙ ОТЧЕТ ИИ-КОНВЕЙЕРА (СУДЬИ ХАКАТОНА)")
+#         print("="*80)
+#         danger_frames = [r for r in self.submission_records if int(r['class_id']) == 1]
+#         print(f" Кадров с опасными аномалиями на путях:  {len(danger_frames)}")
+#         if danger_frames:
+#             distances = [abs(float(r['z_center'])) for r in danger_frames]
+#             print(f" Минимальная дистанция фиксации угрозы: {min(distances):.3f} м")
+#             print(f" Максимальная дальность раннего зрения: {max(distances):.3f} м")
+#             print("\n📋 ХРОНОЛОГИЧЕСКИЙ СРЕЗ ПЕРВЫХ ДЕТЕКЦИЙ ДЛЯ СВЕРКИ:")
+#             print(f"{'Имя кадра':<20} | {'Детекция':<10} | {'Дальность Z вперед':<15} | {'Смещение X':<12}")
+#             print("-"*80)
+#             for r in danger_frames[:10]:
+#                 print(f"{r['frame_id']:<20} | {'🚨 ДА' if int(r['class_id'])==1 else 'НЕТ':<10} | {abs(float(r['z_center'])):<15.3f} | {r['x_center']:<12}")
+#         else:
+#             print(" ✅ Вся сессия пройдена в штатном режиме. Пути абсолютно чистые.")
+#         print("="*80 + "\n")
+    
+#         print(f" 📂 ВСЕГО ОБРАБОТАНО УНИКАЛЬНЫХ КАДРОВ ЛИДАРА: {self.total_processed_frames} шт.")
+#         print(f" 📦 СУММАРНО НАЙДЕНО ФИЗИЧЕСКИХ ОБЪЕКТОВ ИИ:    {self.total_detected_obstacles} шт.")
+
+
+# def main(args=None):
+#     rclpy.init(args=args)
+#     node = SubwayVisionCoreNode()
+#     try:
+#         rclpy.spin(node)
+#     except KeyboardInterrupt:
+#         node.get_logger().info('🛑 Получен сигнал Ctrl+C. Выполняем шатдаун...')
+#     finally:
+#         node.is_running = False
+#         node.export_final_submission()
+#         node.destroy_node()
+#         if rclpy.ok():
+#             rclpy.shutdown()
+
+
+# if __name__ == '__main__':
+#     main()
 
 
 

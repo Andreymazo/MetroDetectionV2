@@ -149,6 +149,28 @@ h2 {
     animation: blink 1s infinite; 
     z-index: 1000; 
 }
+/* ЛЕВЫЙ НИЖНИЙ УГОЛ: Накопительный черный ящик ADAS */
+#adas-chronicle-container { 
+    position: absolute; 
+    bottom: 20px; 
+    left: 20px; 
+    color: #ffaa00; 
+    background: rgba(5, 10, 20, 0.95); 
+    padding: 15px; 
+    border-radius: 8px; 
+    border: 1px solid #ffaa00; 
+    box-shadow: 0 0 15px rgba(255,170,0,0.2); 
+    width: 260px; 
+    max-height: 220px; 
+    overflow-y: auto; 
+    z-index: 1000; 
+    font-family: monospace;
+}
+
+#chronicle-list {
+    margin-top: 8px;
+    font-size: 11px;
+}
 
 @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
 
@@ -193,6 +215,13 @@ h2 {
     
     <!-- Сюда скрипт безопасно добавляет препятствия со скроллом, не раздувая пульт -->
     <div id="danger-targets-list"></div>
+</div>
+<!-- НОВОЕ ОКНО: Сквозной бортовой журнал преград ADAS -->
+<div id="adas-chronicle-container">
+    <div style="font-weight: bold; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid #ffaa00; padding-bottom: 6px;">
+        📡 БОРТОВОЙ ЖУРНАЛ ADAS
+    </div>
+    <div id="chronicle-list">Инициализация локатора...</div>
 </div>
 
 <div id="danger-banner">!!! EMERGENCY BRAKE TRIPPED !!!</div>
@@ -369,6 +398,48 @@ if (data.objects) {
     const targetsListContainer = document.getElementById("danger-targets-list");
     
     targetsListContainer.innerHTML = ""; // Очищаем список целей на левом пульте
+    // Находим контейнер нового нижнего окна
+    const chronicleListContainer = document.getElementById("chronicle-list");
+    chronicleListContainer.innerHTML = ""; // Зачищаем историю перед отрисовкой кадра
+
+    // =========================================================================
+    // 🛰️ РЕНДЕРИНГ ГЛОБАЛЬНОГО НАКОПИТЕЛЬНОГО РАДАРА ADAS (Хронология)
+    // =========================================================================
+    if (data.global_radar_registry && data.global_radar_registry.length > 0) {
+        
+        // Сортируем радарный архив: активные цели всегда принудительно держим вверху списка
+        data.global_radar_registry.sort((a, b) => b.is_active - a.is_active);
+
+        data.global_radar_registry.forEach(g_obj => {
+            let statusColor = "#778899"; // Спокойный стальной серый для пройденных преград
+            let statusText = `⏳ [${g_obj.first_seen_frame} ➔ ${g_obj.last_seen_frame}]`;
+            let borderStyle = "1px solid rgba(255,255,255,0.05)";
+
+            if (g_obj.is_active) {
+                // Если объект находится в зоне видимости прямо сейчас (Действующий!)
+                statusColor = g_obj.position_status === "CENTER" ? "#ff3333" : "#ff7700";
+                statusText = `🎯 [${g_obj.first_seen_frame} ➔ СЕЙЧАС]`;
+                borderStyle = `1px solid ${statusColor}`;
+            }
+
+            chronicleListContainer.innerHTML += `
+            <div style="color: ${statusColor}; margin-bottom: 6px; padding: 6px; background: rgba(255,255,255,0.01); border-left: 3px solid ${statusColor}; border: ${borderStyle}; border-radius: 4px; line-height: 14px; font-size: 10px;">
+                <div style="font-weight: bold; color: #fff; display: flex; justify-content: space-between; margin-bottom: 2px;">
+                    <span>🆔 ЦЕЛЬ #${g_obj.id}</span>
+                    <span style="font-size: 8px; color: ${statusColor}; font-weight: bold; text-transform: uppercase;">
+                        ${g_obj.is_active ? "🚨 LIVE" : "⏳ ПРОЙДЕНА"}
+                    </span>
+                </div>
+                <span style="color: #5577aa;">Тип:</span> <span style="color: #fff;">${g_obj.shape_text}</span><br>
+                <span style="color: #5577aa;">Кадры:</span> <span style="color: #ffaa00; font-weight: bold;">${statusText}</span><br>
+                <span style="color: #5577aa;">Сближение:</span> <span style="color: #00ffcc; font-weight: bold;">${g_obj.min_distance_m.toFixed(1)}м</span>
+            </div>
+            `;
+        });
+    } else {
+        chronicleListContainer.innerHTML = `<div style="color: #5577aa; text-align: center; padding-top: 20px; font-size: 11px;">Журнал ожидает появления преград...</div>`;
+    }
+    // =========================================================================
 
     const realObjects = data.objects.filter(obj => obj.class_id !== -1);
     const hasDanger = data.danger_alert && realObjects.length > 0;

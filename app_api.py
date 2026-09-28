@@ -149,7 +149,8 @@ async def websocket_endpoint(websocket: WebSocket):
     
     session_journal = {
         "current_frame_index": 0,
-        "total_distance_meters": 0.0
+        "total_distance_meters": 0.0,
+        "global_radar_registry": {}  # 📡 Сюда пишем историю уникальных ID
     }
     
     odometry_engine = StableLidarOdometryV12()
@@ -188,36 +189,69 @@ async def websocket_endpoint(websocket: WebSocket):
                         obstacle_tracker_engine.reset()
                         
                     target_file = frame_files[idx]
+                    target_file = frame_files[idx]
                     file_path = os.path.join(TEST_DATA_DIR, target_file)
                     
-                    # --- ГЕО-ШЛЮЗ РАСШИРЕНИЯ ТОННЕЛЯ ---
-                    valid_walls_anchors = [
-                        obj for obj in odometry_engine.anchor_map 
-                        if obj.get("status") == "STATUS_VALID_ANCHOR" and obj.get("is_wall", False) is True
-                    ]
+                    # 🟢 ИСПРАВЛЕНИЕ: Читаем бинарник лидара из файла в массив numpy прямо в ОЗУ
+                    try:
+                        raw_points_array = np.fromfile(file_path, dtype=np.float32).reshape(-1, 4)
+                    except Exception as file_read_err:
+                        print(f"❌ [API ОШИБКА ЧТЕНИЯ КАДРА]: {file_read_err}", flush=True)
+                        session_journal["current_frame_index"] = idx + 1
+                        continue
+                                        # =====================================================================
+                    # 🛰️ [ДИНАМИЧЕСКИЙ АНАЛИЗАТОР ПРОСТРАНСТВА НА ЛЕТУ - СТАНДАРТ ЧЕКЕРА]
+                    # =====================================================================
+                    # Просто смотрим на физическое наличие стен прямо в сыром облаке точек кадра!
+                    # Синхронизируем оси со стандартом ядра v12: 0=X_ширина, 1=Z_ход, 2=Y_высота
+                    x_check = raw_points_array[:, 0]
+                    z_check = np.abs(raw_points_array[:, 1]) # Продольная дальность поезда вперед
+                    y_check = raw_points_array[:, 2] # Честная высота над головкой рельса
                     
-                    is_open_space = False
-                    if len(valid_walls_anchors) > 0:
-                        wall_x_coords = [float(wall_obj["center"]) for wall_obj in valid_walls_anchors if "center" in wall_obj]
-                        if wall_x_coords:
-                            max_wall_x = max(wall_x_coords)
-                            min_wall_x = min(wall_x_coords)
-                            if max_wall_x > config.V2_OBSTACLE_WALL_OPEN_THRESHOLD or min_wall_x < -config.V2_OBSTACLE_WALL_OPEN_THRESHOLD:
-                                is_open_space = True
-                                
+                    # Выделяем срез точек строго на уровне окон состава (Y от -0.5м до 1.5м)
+                    # и ограничиваем дальность ближней зоной (Z < 25 метров), чтобы не собирать дальний шум
+                    side_walls_mask = (y_check >= -0.5) & (y_check <= 1.5) & (z_check < 25.0)
+                    
+                    if np.sum(side_walls_mask) > 100:
+                        # Находим 98-й процентиль ширины — это и есть физическое положение правой/левой стены
+                        max_wall_width = np.percentile(np.abs(x_check[side_walls_mask]), 98)
+                        # Если боковые стены раздвинулись шире 3.2 метров — мы 100% выехали на СТАНЦИЮ
+                        is_open_space = bool(max_wall_width > 3.2)
+                    else:
+                        is_open_space = False
+                        
                     if is_open_space:
-                        print(f" 🛬 [ГЕО-ШЛЮЗ]: Зафиксировано расширение туннеля (Разлет стен: {min_wall_x:.1f}м ... {max_wall_x:.1f}м). Смена режима следования колеи.", flush=True)
-                    
-                    # =====================================================================
-                    # 🟢 КРИТИЧЕСКИЙ АРХИТЕКТУРНЫЙ ФИКС: ЕДИНЫЙ ПРОМЫШЛЕННЫЙ ВЫЗОВ ЯДРА V12
-                    # =====================================================================
-                    # Вызываем монолитный метод-фасад. Он внутри себя сам запустит и холодный старт
-                    # по шпалам, и рельсовый контур ОЯР, и ICP стен ЭЯ, вернув нам точные чистые данные.
-                    shift_z_physical, rail_passport = odometry_engine.update_odometry_fusion(file_path, idx, dt)
+                        print(f" 📡 [АУДИТ ПРОСТРАНСТВА ОЗУ]: Кадр {target_file} ➔ Впереди ПЛАТФОРМА / СТАНЦИЯ (is_open_space=True)", flush=True)
                     # =====================================================================
 
-                    # Вызываем пайплайн детекции v2 с передачей честного шага одометрии
-                    detected_obstacles = process_point_cloud(file_path, obstacle_tracker_engine, train_step_z=shift_z_physical, is_open_space=is_open_space)
+                    # --- ГЕО-ШЛЮЗ РАСШИРЕНИЯ ТОННЕЛЯ ---
+                    # valid_walls_anchors = [
+                    #     obj for obj in odometry_engine.anchor_map 
+                    #     if obj.get("status") == "STATUS_VALID_ANCHOR" and obj.get("is_wall", False) is True
+                    # ]
+                    
+                    # is_open_space = False
+                    # if len(valid_walls_anchors) > 0:
+                    #     wall_x_coords = [float(wall_obj["center"]) for wall_obj in valid_walls_anchors if "center" in wall_obj]
+                    #     if wall_x_coords:
+                    #         max_wall_x = max(wall_x_coords)
+                    #         min_wall_x = min(wall_x_coords)
+                    #         if max_wall_x > config.V2_OBSTACLE_WALL_OPEN_THRESHOLD or min_wall_x < -config.V2_OBSTACLE_WALL_OPEN_THRESHOLD:
+                    #             is_open_space = True
+                                
+                    # if is_open_space:
+                    #     print(f" 🛬 [ГЕО-ШЛЮЗ]: Зафиксировано расширение туннеля (Разлет стен: {min_wall_x:.1f}м ... {max_wall_x:.1f}м). Смена режима следования колеи.", flush=True)
+                    
+                    # =====================================================================
+                    # 🟢 КРИТИЧЕСКИЙ АРХИТЕКТУРНЫЙ ФИКС: ПЕРЕДАЕМ МАССИВ ВМЕСТО СТРОКИ ПУТИ
+                    # =====================================================================
+                    # Передаем сырой numpy-массив точек. Ядро одометрии v12 теперь примет его 
+                    # без конфликта типов и успешно выполнит двухконтурный арбитраж!
+                    shift_z_physical, rail_passport = odometry_engine.update_odometry_fusion(raw_points_array, idx, dt)
+                    # =====================================================================
+
+                    # 🟢 ИСПРАВЛЕНИЕ ДЛЯ ДЕТЕКТОРА: Ему тоже скармливаем готовый массив из ОЗУ!
+                    detected_obstacles = process_point_cloud(raw_points_array, obstacle_tracker_engine, train_step_z=shift_z_physical, is_open_space=is_open_space)
 
                     # Переводим результирующий чистый физический сдвиг шлюза в скорость км/ч
                     calculated_speed_kmh = (shift_z_physical / dt) * 3.6
@@ -361,8 +395,50 @@ async def websocket_endpoint(websocket: WebSocket):
                           f"Путь: {session_journal['total_distance_meters']:.1f} м | "
                           f"Преграды: {obs_status_str}", flush=True)
 
+
+                    # =====================================================================
+                    # 📡 НАКОПИТЕЛЬНЫЙ ИИ-РАДАР ХРОНОЛОГИИ КАДРОВ ADAS (Фикс интерфейса)
+                    # =====================================================================
+                    # Выдергиваем только препятствия (class_id == 1) из уже готового frame_data
+                    current_active_obstacles = [obj for obj in frame_data["objects"] if obj.get("class_id") == 1]
+                    current_frame_ids = set()
+
+                    for obs_obj in current_active_obstacles:
+                        t_id = str(obs_obj["id"])
+                        current_frame_ids.add(t_id)
+                        # Извлекаем честную дистанцию по оси Z из трехмерного центра
+                        current_dist = abs(float(obs_obj["center"][2]))
+
+                        if t_id not in session_journal["global_radar_registry"]:
+                            # Объект обнаружен впервые за поездку — замораживаем кадр старта и финала
+                            session_journal["global_radar_registry"][t_id] = {
+                                "id": t_id,
+                                "shape_text": obs_obj.get("shape_text", "Объект"),
+                                "position_text": obs_obj.get("position_text", "На путях"),
+                                "first_seen_frame": target_file,  # Первый кадр засечки
+                                "last_seen_frame": target_file,   # Последний кадр ведения
+                                "min_distance_m": round(current_dist, 1),
+                                "is_active": True
+                            }
+                        else:
+                            # Объект уже сопровождается — обновляем крайний кадр видимости и крит. сближение
+                            tgt = session_journal["global_radar_registry"][t_id]
+                            tgt["last_seen_frame"] = target_file
+                            tgt["min_distance_m"] = min(tgt["min_distance_m"], round(current_dist, 1))
+                            tgt["is_active"] = True
+
+                    # Контроль ушедших целей: если объект потерян из виду на текущем кадре
+                    for t_id, global_obj in session_journal["global_radar_registry"].items():
+                        if t_id not in current_frame_ids:
+                            global_obj["is_active"] = False # Снимаем флаг активности, фиксируя интервал
+
+                    # Пакуем накопленный радарный лог в корень пакета для Three.js
+                    frame_data["global_radar_registry"] = list(session_journal["global_radar_registry"].values())
+                    # =====================================================================
+
                     session_journal["current_frame_index"] = idx + 1
                     await websocket.send_json(frame_data)
+
                     
                     # Безопасное ручное освобождение памяти такта (passports убран из-за инкапсуляции)
                     del macro_cloud, detected_obstacles, valid_walls_anchors
