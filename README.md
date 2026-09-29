@@ -141,7 +141,7 @@ docker exec -it metro_live_container bash
 
 *   **Для тестирования сценария платформы (Platform):**
     ```bash
-    export FASTRTPS_DEFAULT_PROFILES_FILE=/app/fastdds_config.xml
+    export FASTRTPS_DEFAULT_PROFILES_FILE=/app/fastdds_shm.xml
     source /opt/ros/humble/setup.bash
     python3 /app/metro_lidar/lidar_detector_node.py --ros-args -p use_sim_time:=false -p scenario:="doubleT_platform"
     ```
@@ -149,7 +149,7 @@ docker exec -it metro_live_container bash
 
 *   **Для тестирования сценария с препятствиями (Obstacle):**
     ```bash
-    export FASTRTPS_DEFAULT_PROFILES_FILE=/app/fastdds_config.xml
+    export FASTRTPS_DEFAULT_PROFILES_FILE=/app/fastdds_shm.xml
     source /opt/ros/humble/setup.bash
     python3 /app/metro_lidar/lidar_detector_node.py --ros-args -p use_sim_time:=false -p scenario:="doubleT_obstacle"
     ```
@@ -157,7 +157,6 @@ docker exec -it metro_live_container bash
 
 > 💡 **Бизнес-преимущество (Dynamic Parameter Callback):** Если нода уже запущена в терминале, переключать сценарии можно «на лету» без перезапуска самого Python-процесса. Судейский скрипт может отправить команду реконфигурации из соседней консоли:
 > `ros2 param set /subway_vision_core_node scenario "doubleT_obstacle"`
-> Встроенный в ядро механизм перехватит событие, атомарно уничтожит старый сетевой дескриптор, перечитает новый YAML-манифест и мгновенно откроет подписку на актуальный топик.
 
 #### 🎛️ ТЕРМИНАЛ №2: Запуск воспроизведения bag-файла
 
@@ -168,17 +167,11 @@ docker exec -it metro_live_container bash
 
 Запуск соответствующего оригинального bag-файла Мосметро (строго в соответствии с выбранным в Терминале №1 сценарием):
 ```bash
-export FASTRTPS_DEFAULT_PROFILES_FILE=/app/fastdds_config.xml
+export FASTRTPS_DEFAULT_PROFILES_FILE=/app/fastdds_shm.xml
 source /opt/ros/humble/setup.bash
 ros2 bag play /app/for_hackathon/doubleT_obstacle/
 ```
 
-Запуск оригинального bag-файла Мосметро:
-```bash
-export FASTRTPS_DEFAULT_PROFILES_FILE=/app/fastdds_config.xml
-source /opt/ros/humble/setup.bash
-ros2 bag play /app/for_hackathon/doubleT_obstacle/
-```
 
 ### 🏁 Финал сессии проезда:
 1. Плеер во Втором окне полностью передает данные лидара по DDS-протоколу и закрывается.
