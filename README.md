@@ -223,6 +223,12 @@ python3 quick_check.py --scenario ./test_lidar_frames/roundT_doubleT
 ```bash
 uvicorn app_api:app --host 0.0.0.0 --port 8000 --log-level info
 ```
+можно просто
+
+```bash
+python app_api.py
+```
+
 
 
 **Точки доступа к симуляции (в браузере на хост-машине):**
