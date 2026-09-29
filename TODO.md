@@ -68,7 +68,8 @@ andreymazo@andreymazo-GF63-Thin-11UC:~/Projects/MetroDetectionV2$ docker ps
 CONTAINER ID   IMAGE         COMMAND                  CREATED        STATUS        PORTS     NAMES
 55128dc2a33b   metro_lidar   "/ros_entrypoint.sh …"   11 hours ago   Up 11 hours             metro_live_container
 
-
+зайти в последний:
+docker exec -it $(docker ps -lq) bash
 
 
 ros2 bag play /app/for_hackathon/doubleT_obstacle --clock -r 1.0 --loop 2>&1 | tee /app/bagplay.log

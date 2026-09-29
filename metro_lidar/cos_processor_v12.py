@@ -370,23 +370,7 @@ class StableLidarOdometryV12:
 
         stab_speed = self.stabilizer_engine.prev_velocity_kmh
 
-        # --- ОРГАН АРБИТРАЖА НА ТАКТЕ 3 ---
-        # if local_stab_idx == 3:
-        #     expected_stab_step = (stab_speed / 3.6) * dt
-        #     stab_step_delta = abs(abs(shift_z_physical_stab) - abs(expected_stab_step))
-
-        #     if (self.prev_velocity_kmh <= 0.2 and stab_speed > 2.0 and stab_step_delta <= config.MAX_PHYSICAL_ACCEL_Z):
-        #         print(f"\n⚡ [ЯДРО ОДОМЕТРИИ АРБИТРАЖ]: Основной контур выведен из комы! "
-        #               f"Стабилизатор подтвержден (ΔШага {stab_step_delta:.4f}м <= {config.MAX_PHYSICAL_ACCEL_Z}м). "
-        #               f"Инжектирую скорость: {stab_speed:.2f} км/ч\n", flush=True)
-                
-        #         self.prev_velocity_kmh = stab_speed
-        #         self.anchor_map = self.stabilizer_engine.anchor_map
-        #         self.rail_raw_anchor = self.stabilizer_engine.rail_raw_anchor
-        #         self.rail_accum_z_predicted = self.stabilizer_engine.rail_accum_z_predicted
-                
-        #         shift_z_physical_main = shift_z_physical_stab
-                # --- МОДЕРНИЗИРОВАННЫЙ ОРГАН АРБИТРАЖА НА ТАКТЕ 3 (УПРАВЛЕНИЕ ИЗ CONFIG) ---
+        # --- МОДЕРНИЗИРОВАННЫЙ ОРГАН АРБИТРАЖА НА ТАКТЕ 3 (УПРАВЛЕНИЕ ИЗ CONFIG) ---
         if local_stab_idx == 3:
             expected_stab_step = (stab_speed / 3.6) * dt
             stab_step_delta = abs(abs(shift_z_physical_stab) - abs(expected_stab_step))
